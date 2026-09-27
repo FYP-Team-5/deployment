@@ -9,7 +9,7 @@ interface; connect through AWS Systems Manager Session Manager.
 
 ```text
 deployment/                         This Git repository
-├── .gitignore                      Ignored local state, plans, and secrets
+├── .gitignore                      Ignored local state, plans, and .env files
 ├── .terraform.lock.hcl             Locked AWS provider version; commit this
 ├── README.md                       Setup, access, and teardown instructions
 ├── versions.tf                     Terraform and AWS provider requirements
@@ -17,17 +17,17 @@ deployment/                         This Git repository
 ├── main.tf                         AWS networking, IAM, and EC2 resources
 ├── outputs.tf                      Instance ID, Region, and public IP
 ├── user-data.sh.tftpl              First-boot setup and systemd services
+├── connect-vllm.sh                 Local SSM port-forward helper
 └── Script/
     ├── serve_qwen35_vllm.sh        Dependency setup and vLLM launch
-    ├── requirements-vllm.txt       Pinned Python serving packages
-    └── .env                        Optional local secret file; ignored by Git
+    └── requirements-vllm.txt       Pinned Python serving packages
 ```
 
 Terraform creates `.terraform/` and `terraform.tfstate*` locally; both are
 ignored by Git. The `qlora/`, `grading/`, and `frontend/` folders beside
 `deployment/` in the FYP workspace are separate projects. Terraform packages
-the two non-secret files under `Script/` into EC2 user data. It does not upload
-`Script/.env` or any files from those sibling folders.
+the two files under `Script/` into EC2 user data. It does not upload a local
+`Script/.env` file or any files from those sibling folders.
 
 ## Infrastructure
 
@@ -59,41 +59,24 @@ storage service recreates them, and the serving script reinstalls and
 downloads what it needs. The EBS root volume is billed separately from the
 instance.
 
-## Secrets and where to store them
+## Credentials and model access
 
-| Secret or credential | Needed? | Storage and use |
-| --- | --- | --- |
-| AWS credentials | Required on the machine running Terraform and the AWS CLI. | Use an AWS CLI profile or SSO configuration outside this repository. Terraform uses that identity; it does not copy credentials to EC2. |
-| `HF_TOKEN` | Optional for the default public models; required for a private or gated Hugging Face model or adapter. | Store in `/opt/qwen-vllm/Script/.env` **on EC2**, owned by `ubuntu` with mode `0600`. The serving script reads and exports this key. |
-| `VLLM_API_KEY` | Not used by this deployment. | The local `Script/.env` may contain this key, but the serving script does not read it or enable API-key authentication. Access is limited to an SSM tunnel and the instance's loopback interface. |
+Both configured model repositories are public, so the deployment requires no
+model secret. The deployment script does not read `.env`. A local `Script/.env`
+file, if present, is ignored by Git and is not copied to EC2. `VLLM_API_KEY`
+in that file is also unused; API access is limited to an SSM tunnel and the
+instance's loopback interface.
 
-Do not put tokens in `.tfvars`, Terraform variables, `user-data.sh.tftpl`, or
-committed files: Terraform stores user data and variable values in state.
-`Script/.env` is ignored by Git, but Terraform never sends that local file to
-EC2. The commands below start from the FYP workspace root. For a private or
-gated model, after the instance is running:
+AWS credentials are needed only on the machine running Terraform and the AWS
+CLI. Store them in your AWS CLI profile or SSO configuration outside this
+repository. Terraform uses that identity and grants the EC2 instance its own
+SSM role; it does not copy your local credentials to EC2. Do not put secrets in
+Terraform variables or user data because Terraform stores those values in
+state.
 
-```bash
-cd deployment
-aws ssm start-session --region us-east-1 --target "$(terraform output -raw instance_id)"
-```
-
-Inside the Session Manager shell, create the EC2 secret file the first time,
-then edit it:
-
-```bash
-sudo install -o ubuntu -g ubuntu -m 0600 /dev/null /opt/qwen-vllm/Script/.env
-sudo -u ubuntu vi /opt/qwen-vllm/Script/.env
-```
-
-Enter `HF_TOKEN=your_token` in the editor, save it, then restart the service:
-
-```bash
-sudo systemctl restart qwen-vllm
-```
-
-If you use a different adapter, set `LORA_PATH` in the service environment and
-restart it. The script reads `.env` without executing it as shell code.
+If you change `BASE_MODEL` or `LORA_PATH` to a private or gated repository,
+you will need to add authenticated model access separately before starting
+the service.
 
 ## Build
 
@@ -114,26 +97,56 @@ Terraform state is local by default and ignored by Git. Keep it until teardown;
 losing it makes destruction harder. Applying the plan creates billable AWS
 resources.
 
-## Check startup and connect
+## Connect from the local frontend and backend
 
-Install the AWS CLI and its Session Manager plugin on your local machine. Use
-the same Region and profile as Terraform. In one terminal, start a tunnel:
+Install the AWS CLI and its [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+on your computer. After `terraform apply`, start the tunnel in a dedicated
+terminal and leave it running:
 
 ```bash
-aws ssm start-session \
-  --region us-east-1 \
-  --target "$(terraform output -raw instance_id)" \
-  --document-name AWS-StartPortForwardingSession \
-  --parameters '{"portNumber":["8000"],"localPortNumber":["8000"]}'
+cd deployment
+./connect-vllm.sh
 ```
 
-Then in another terminal:
+This forwards EC2 port `8000` to **port `8000` on your computer**. In another
+terminal, check that both model names are available:
 
 ```bash
 curl http://127.0.0.1:8000/v1/models
 ```
 
-To inspect boot and service logs, open a Session Manager shell:
+The browser frontend should keep calling the local backend; it does not need
+the EC2 address. Set the local grading backend's `.env` to call the forwarded
+vLLM endpoint:
+
+```dotenv
+# If grading runs directly on your computer:
+LLM_URL=http://127.0.0.1:8000/v1/chat/completions
+LLM_MODEL=qwen35-9b-grading-qlora
+LLM_API_KEY=
+```
+
+If grading runs through `grading/compose.yaml`, use
+`LLM_URL=http://host.docker.internal:8000/v1/chat/completions` instead;
+`localhost` inside the container refers to the container itself. If its API
+container is already running, recreate it after changing `.env`, then check
+that it can reach the tunnel:
+
+```bash
+cd grading
+docker compose up -d --force-recreate api
+docker compose exec api curl -fsS http://host.docker.internal:8000/v1/models
+```
+
+The last command checks whether your Docker runtime can reach the host-side
+tunnel. If it cannot reach a loopback-only tunnel, run the grading backend
+directly on your computer using its README's non-Docker instructions. Keep the
+tunnel terminal open while grading; closing it disconnects the backend from
+vLLM. The EC2 security group does not expose port `8000` to the internet.
+The current grading Compose file also expects external database and vector
+services; the tunnel supplies only the LLM connection.
+
+To inspect boot and service logs, open a separate Session Manager shell:
 
 ```bash
 aws ssm start-session --region us-east-1 --target "$(terraform output -raw instance_id)"

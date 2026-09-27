@@ -14,7 +14,6 @@ BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3.5-9B}"
 BASE_MODEL_NAME="${BASE_MODEL_NAME:-qwen35-9b-base}"
 LORA_MODEL_NAME="${LORA_MODEL_NAME:-qwen35-9b-grading-qlora}"
 LORA_PATH="${LORA_PATH:-SmuFypTeam5/GradingQlora}"
-ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/.env}"
 
 HOST="${VLLM_HOST:-0.0.0.0}"
 PORT="${VLLM_PORT:-8000}"
@@ -50,7 +49,6 @@ Important environment overrides:
   VLLM_QUANTIZATION             bitsandbytes or none (default: bitsandbytes)
   VLLM_ENFORCE_EAGER            1 saves CUDA-graph memory; 0 enables graphs
   VLLM_USE_FLASHINFER_SAMPLER   0 avoids nvcc JIT; 1 enables it (default: 0)
-  ENV_FILE                      File from which to read HF_TOKEN (default: .env)
   VLLM_INSTALL_DEPS             Set to 0 to use an existing environment (default: 1)
   REQUIREMENTS_FILE             Pinned serving dependencies
   VENV_DIR                      Python 3.12 serving environment
@@ -102,50 +100,6 @@ install_dependencies() {
 }
 
 install_dependencies
-
-read_env_value() {
-    local path="$1"
-    local requested_key="$2"
-    local line name value
-
-    [[ -f "$path" ]] || return 1
-
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line="${line#"${line%%[![:space:]]*}"}"
-        [[ -z "$line" || "${line:0:1}" == "#" || "$line" != *"="* ]] && continue
-
-        line="${line#export }"
-        name="${line%%=*}"
-        value="${line#*=}"
-        name="${name%"${name##*[![:space:]]}"}"
-        value="${value#"${value%%[![:space:]]*}"}"
-        value="${value%"${value##*[![:space:]]}"}"
-
-        [[ "$name" == "$requested_key" ]] || continue
-
-        if [[ ${#value} -ge 2 ]]; then
-            if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
-                value="${value:1:${#value}-2}"
-            elif [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
-                value="${value:1:${#value}-2}"
-            fi
-        fi
-
-        printf '%s' "$value"
-        return 0
-    done < "$path"
-
-    return 1
-}
-
-# Hugging Face Hub automatically consumes an exported HF_TOKEN. Reading only
-# this key avoids executing arbitrary shell content from .env.
-if [[ -z "${HF_TOKEN:-}" ]]; then
-    HF_TOKEN="$(read_env_value "$ENV_FILE" HF_TOKEN || true)"
-    if [[ -n "$HF_TOKEN" ]]; then
-        export HF_TOKEN
-    fi
-fi
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     echo "ERROR: Python executable not found: $PYTHON_BIN" >&2
