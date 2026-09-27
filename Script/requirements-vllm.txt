@@ -1,0 +1,6 @@
+# Python 3.12; vLLM installs its compatible CUDA PyTorch wheel.
+vllm==0.29.0
+vllm-bnb-plugin==0.0.3
+bitsandbytes==0.50.2
+transformers==5.17.0
+huggingface-hub==1.31.0

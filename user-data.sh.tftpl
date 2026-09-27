@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y python3-venv ca-certificates e2fsprogs util-linux
+
+install -d -o ubuntu -g ubuntu /opt/qwen-vllm/Script
+echo '${serve_script}' | base64 -d | gzip -d > /opt/qwen-vllm/Script/serve_qwen35_vllm.sh
+echo '${requirements}' | base64 -d | gzip -d > /opt/qwen-vllm/Script/requirements-vllm.txt
+chmod 0755 /opt/qwen-vllm/Script/serve_qwen35_vllm.sh
+chown ubuntu:ubuntu /opt/qwen-vllm/Script/serve_qwen35_vllm.sh /opt/qwen-vllm/Script/requirements-vllm.txt
+
+cat > /usr/local/sbin/prepare-llm-storage <<'STORAGE'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+device=""
+for attempt in $(seq 1 30); do
+    device="$(lsblk -dn -o NAME,MODEL | awk '$0 ~ /Amazon EC2 NVMe Instance Storage/ { print "/dev/" $1; exit }')"
+    [[ -n "$device" ]] && break
+    sleep 2
+done
+[[ -n "$device" ]] || { echo "ERROR: EC2 NVMe instance store was not found" >&2; exit 1; }
+
+if ! blkid -s TYPE -o value "$device" >/dev/null 2>&1; then
+    mkfs.ext4 -F "$device"
+fi
+
+mkdir -p /mnt/llm-data
+if ! mountpoint -q /mnt/llm-data; then
+    mount "$device" /mnt/llm-data
+fi
+install -d -o ubuntu -g ubuntu /mnt/llm-data/cache /mnt/llm-data/venv /mnt/llm-data/bootstrap /mnt/llm-data/uv-cache /mnt/llm-data/uv-python /mnt/llm-data/pip-cache /mnt/llm-data/xdg-cache
+STORAGE
+chmod 0755 /usr/local/sbin/prepare-llm-storage
+
+cat > /etc/systemd/system/llm-storage.service <<'UNIT'
+[Unit]
+Description=Mount EC2 NVMe instance store for LLM caches
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/prepare-llm-storage
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat > /etc/systemd/system/qwen-vllm.service <<'UNIT'
+[Unit]
+Description=Qwen3.5-9B vLLM server
+Wants=network-online.target
+Requires=llm-storage.service
+After=network-online.target llm-storage.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/qwen-vllm/Script
+Environment=VLLM_HOST=127.0.0.1
+Environment=VLLM_MAX_MODEL_LEN=8192
+Environment=VLLM_GPU_MEMORY_UTILIZATION=0.90
+Environment=VLLM_MAX_NUM_SEQS=1
+Environment=HF_HOME=/mnt/llm-data/cache
+Environment=VENV_DIR=/mnt/llm-data/venv
+Environment=BOOTSTRAP_VENV=/mnt/llm-data/bootstrap
+Environment=UV_CACHE_DIR=/mnt/llm-data/uv-cache
+Environment=UV_PYTHON_INSTALL_DIR=/mnt/llm-data/uv-python
+Environment=PIP_CACHE_DIR=/mnt/llm-data/pip-cache
+Environment=XDG_CACHE_HOME=/mnt/llm-data/xdg-cache
+ExecStart=/opt/qwen-vllm/Script/serve_qwen35_vllm.sh
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now llm-storage.service
+systemctl enable --now qwen-vllm.service
