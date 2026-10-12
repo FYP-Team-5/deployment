@@ -161,29 +161,39 @@ cat > /usr/local/sbin/prepare-llm-storage <<'STORAGE'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-device=""
-for attempt in $(seq 1 30); do
-    device="$(lsblk -dn -o NAME,MODEL | awk '$0 ~ /Amazon EC2 NVMe Instance Storage/ { print "/dev/" $1; exit }')"
-    [[ -n "$device" ]] && break
-    sleep 2
-done
-[[ -n "$device" ]] || { echo "ERROR: EC2 NVMe instance store was not found" >&2; exit 1; }
+# The Deep Learning AMI initializes the NVMe disk as an LVM volume and
+# mounts its ext4 filesystem at /opt/dlami/nvme. Never format the PV directly.
+source_mount=/opt/dlami/nvme
+target_mount=/mnt/llm-data
 
-if ! blkid -s TYPE -o value "$device" >/dev/null 2>&1; then
-    mkfs.ext4 -F "$device"
+if ! mountpoint -q "$source_mount"; then
+    echo "ERROR: DLAMI NVMe mount is unavailable at $source_mount" >&2
+    exit 1
 fi
 
-mkdir -p /mnt/llm-data
-if ! mountpoint -q /mnt/llm-data; then
-    mount "$device" /mnt/llm-data
+mkdir -p "$source_mount/llm-data" "$target_mount"
+if ! mountpoint -q "$target_mount"; then
+    mount --bind "$source_mount/llm-data" "$target_mount"
 fi
-install -d -o ubuntu -g ubuntu /mnt/llm-data/cache /mnt/llm-data/venv /mnt/llm-data/bootstrap /mnt/llm-data/uv-cache /mnt/llm-data/uv-python /mnt/llm-data/pip-cache /mnt/llm-data/xdg-cache
+
+install -d -o ubuntu -g ubuntu \
+    "$target_mount/cache" \
+    "$target_mount/venv" \
+    "$target_mount/bootstrap" \
+    "$target_mount/uv-cache" \
+    "$target_mount/uv-python" \
+    "$target_mount/pip-cache" \
+    "$target_mount/xdg-cache"
+
 STORAGE
 chmod 0755 /usr/local/sbin/prepare-llm-storage
 
 cat > /etc/systemd/system/llm-storage.service <<'UNIT'
 [Unit]
-Description=Mount EC2 NVMe instance store for LLM caches
+Description=Prepare LLM storage using DLAMI NVMe
+Requires=dlami-nvme.service
+After=dlami-nvme.service
+RequiresMountsFor=/opt/dlami/nvme
 
 [Service]
 Type=oneshot
@@ -206,10 +216,11 @@ Type=simple
 User=ubuntu
 Group=ubuntu
 WorkingDirectory=/opt/qwen-vllm/Script
-Environment=VLLM_HOST=0.0.0.0
-Environment=VLLM_MAX_MODEL_LEN=8192
-Environment=VLLM_GPU_MEMORY_UTILIZATION=0.90
-Environment=VLLM_MAX_NUM_SEQS=1
+Environment=FYP_VLLM_HOST=0.0.0.0
+Environment=FYP_VLLM_MAX_MODEL_LEN=8192
+Environment=FYP_VLLM_GPU_MEMORY_UTILIZATION=0.90
+Environment=FYP_VLLM_MAX_NUM_SEQS=1
+Environment=FYP_VLLM_MAX_LORA_RANK=64
 Environment=HF_HOME=/mnt/llm-data/cache
 Environment=VENV_DIR=/mnt/llm-data/venv
 Environment=BOOTSTRAP_VENV=/mnt/llm-data/bootstrap
