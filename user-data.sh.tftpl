@@ -3,7 +3,43 @@ set -Eeuo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y python3-venv ca-certificates e2fsprogs util-linux
+apt-get install -y python3-venv ca-certificates curl e2fsprogs util-linux
+
+# Install Docker Engine and Compose from Docker's official Ubuntu repository.
+# Cloud-init user data runs as root; no sudo is needed here.
+for package in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
+    if dpkg -s "$package" >/dev/null 2>&1; then
+        apt-get remove -y "$package"
+    fi
+done
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+
+. /etc/os-release
+cat > /etc/apt/sources.list.d/docker.sources <<DOCKER_SOURCES
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $VERSION_CODENAME
+Components: stable
+Signed-By: /etc/apt/keyrings/docker.asc
+DOCKER_SOURCES
+
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable --now docker
+
+# Bind Portainer's HTTPS UI only to EC2 loopback; access it using an SSM tunnel.
+# The named volume persists across reboots, but not Terraform instance replacement.
+docker volume create portainer_data
+docker run -d \
+    --name portainer \
+    --restart always \
+    -p 127.0.0.1:9443:9443 \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -v portainer_data:/data \
+    portainer/portainer-ce:lts
 
 install -d -o ubuntu -g ubuntu /opt/qwen-vllm/Script
 echo '${serve_script}' | base64 -d | gzip -d > /opt/qwen-vllm/Script/serve_qwen35_vllm.sh
