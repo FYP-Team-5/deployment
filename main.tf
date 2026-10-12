@@ -13,7 +13,7 @@ resource "aws_vpc" "llm" {
 resource "aws_subnet" "llm" {
   vpc_id                  = aws_vpc.llm.id
   cidr_block              = "10.42.1.0/24"
-  map_public_ip_on_launch = true
+  map_public_ip_on_launch = false
 
   tags = { Name = "${var.name}-public" }
 }
@@ -103,7 +103,7 @@ resource "aws_instance" "llm" {
   subnet_id                   = aws_subnet.llm.id
   vpc_security_group_ids      = [aws_security_group.llm.id]
   iam_instance_profile        = aws_iam_instance_profile.llm.name
-  associate_public_ip_address = true
+  associate_public_ip_address = false
 
   user_data_base64 = base64encode(templatefile("${path.module}/user-data.sh.tftpl", {
     serve_script = base64gzip(file("${path.module}/Script/serve_qwen35_vllm.sh"))
