@@ -1,6 +1,6 @@
 # FYP EC2 deployment
 
-Terraform allocates an Elastic IP for the lifetime of the Terraform stack and launches a GPU-backed Ubuntu 22.04 EC2 instance running Qwen3.5-9B via vLLM. The first-boot user-data script installs Docker Engine and Compose, clones the public [frontend](https://github.com/FYP-Team-5/frontend) and [backend](https://github.com/FYP-Team-5/backend) repositories, copies their .env.example files to .env, configures host addresses and generated secrets, then launches both Compose stacks. No Portainer is installed.
+Terraform allocates an Elastic IP for the lifetime of the Terraform stack and launches a GPU-backed Ubuntu 22.04 EC2 instance running Qwen3.5-9B via vLLM. The first-boot user-data script reuses Docker Engine and Compose supplied by the AMI, clones the public [frontend](https://github.com/FYP-Team-5/frontend) and [backend](https://github.com/FYP-Team-5/backend) repositories, copies their .env.example files to .env, configures host addresses and generated secrets, then launches both Compose stacks. No Portainer is installed.
 
 ## EC2 Instance Connect (browser SSH)
 
@@ -58,6 +58,12 @@ Log ingestion and storage can incur AWS charges when usage exceeds applicable fr
 
 The security-group description refers to **public frontend (TCP 3000) and backend (TCP 8002)**. The EC2 instance has an Elastic IP and lives in a subnet with a route to an Internet Gateway. The vLLM process binds to `0.0.0.0:8000` on the EC2 host so that the Docker backend can connect, but **the security group does not allow inbound TCP 8000**. Thus, vLLM is not directly reachable from the public internet through this configuration. Use SSM port forwarding (`./connect-vllm.sh`) for direct administration. Do not add an inbound port 8000 rule for public access.
 
+## vLLM configuration
+
+The GradingQlora adapter uses LoRA rank **48**. vLLM 0.29.0 requires setting `--max-lora-rank` to the supported capacity **64**, not 48. The serving wrapper uses `FYP_VLLM_*` variables for command-line settings to avoid vLLM warnings from unrecognized `VLLM_*` variables. These include `FYP_VLLM_HOST=0.0.0.0`, `FYP_VLLM_MAX_MODEL_LEN=8192`, `FYP_VLLM_GPU_MEMORY_UTILIZATION=0.90`, `FYP_VLLM_MAX_NUM_SEQS=1`, and `FYP_VLLM_MAX_LORA_RANK=64`. The wrapper retains `VLLM_USE_FLASHINFER_SAMPLER`, which is passed to vLLM itself. This deployment keeps bitsandbytes quantization and eager mode enabled.
+
+Do not mistake changing the wrapper's default for updating an already running EC2 instance. The systemd unit on the existing EC2 host needs updating separately or the instance needs replacement. In this Terraform stack `user_data_replace_on_change=true`, so check `terraform plan` before applying: replacing EC2 destroys instance-local data.
+
 ## Troubleshooting
 
 From your workstation, open an SSM session:
@@ -88,7 +94,7 @@ The frontend Next.js build embeds NEXT_PUBLIC_* variables, so it must be rebuilt
 
 **This is a development/demo HTTP deployment, not production-ready.** Both port 3000 and port 8002 are publicly accessible without TLS. The frontend's NEXT_PUBLIC_GRADING_API_KEY is embedded in browser JavaScript and cannot be treated as a secret. Add HTTPS and strong server-side authorization before production use. The startup process does not deploy any separate RAG service, so frontend RAG features still require configuration.
 
-The EC2 instance uses 125 GB of ephemeral NVMe instance store for its LLM model caches, plus the AMI's EBS root volume for Docker and PostgreSQL. Replacing the EC2 instance destroys both, including database data and .env files. `main.tf` sets `user_data_replace_on_change = true`, so **Terraform changes to startup scripts cause instance replacement**. Check terraform plan carefully before apply.
+The EC2 instance uses 125 GB of ephemeral NVMe instance store for its LLM model caches, plus the AMI's EBS root volume for Docker and PostgreSQL. The Deep Learning AMI's `dlami-nvme.service` provisions the instance store as LVM and mounts ext4 at `/opt/dlami/nvme`. Our `llm-storage.service` runs afterward and bind-mounts `/opt/dlami/nvme/llm-data` at `/mnt/llm-data`; it must not format the LVM physical volume. Replacing the EC2 instance destroys both, including database data and .env files. `main.tf` sets `user_data_replace_on_change = true`, so **Terraform changes to startup scripts cause instance replacement**. Check terraform plan carefully before apply.
 
 ## Elastic IP and teardown lifecycle
 
