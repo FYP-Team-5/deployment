@@ -23,6 +23,48 @@ done
 apt-get update
 apt-get install -y python3-venv ca-certificates curl git openssl e2fsprogs util-linux
 
+# Start CloudWatch collection before the long Docker and vLLM setup.
+# Terraform manages the destination log groups and their 7-day retention.
+cw_agent_deb="$(mktemp --suffix=.deb)"
+curl -fSL --retry 5 \
+  "https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb" \
+  -o "$cw_agent_deb"
+dpkg -i "$cw_agent_deb"
+rm -f "$cw_agent_deb"
+
+mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+cat > /opt/aws/amazon-cloudwatch-agent/etc/fyp-logs.json <<'CLOUDWATCH'
+{
+  "agent": {
+    "region": "${aws_region}"
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [{
+          "file_path": "/var/log/cloud-init-output.log",
+          "log_group_name": "${cloud_init_log_group}",
+          "log_stream_name": "{instance_id}"
+        }]
+      },
+      "journald": {
+        "collect_list": [{
+          "units": ["qwen-vllm.service"],
+          "priority": "info",
+          "log_group_name": "${vllm_log_group}",
+          "log_stream_name": "{instance_id}"
+        }]
+      }
+    }
+  }
+}
+CLOUDWATCH
+
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/fyp-logs.json -s
+
+
 # Install Docker Engine and Compose from Docker's official Ubuntu repository.
 # Cloud-init user data runs as root; no sudo is needed here.
 for package in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
