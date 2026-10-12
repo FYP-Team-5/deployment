@@ -97,6 +97,16 @@ resource "aws_iam_instance_profile" "llm" {
   role        = aws_iam_role.llm.name
 }
 
+resource "aws_eip" "llm" {
+  domain = "vpc"
+
+  tags = { Name = "${var.name}-static-ip" }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 resource "aws_instance" "llm" {
   ami                         = data.aws_ssm_parameter.gpu_ami.value
   instance_type               = "g4dn.xlarge"
