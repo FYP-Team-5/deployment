@@ -129,3 +129,8 @@ resource "aws_instance" "llm" {
 
   depends_on = [aws_route_table_association.public, aws_iam_role_policy_attachment.ssm]
 }
+
+resource "aws_eip_association" "llm" {
+  instance_id   = aws_instance.llm.id
+  allocation_id = aws_eip.llm.id
+}
