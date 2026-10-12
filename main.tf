@@ -101,10 +101,6 @@ resource "aws_eip" "llm" {
   domain = "vpc"
 
   tags = { Name = "${var.name}-static-ip" }
-
-  lifecycle {
-    prevent_destroy = true
-  }
 }
 
 resource "aws_instance" "llm" {
@@ -114,6 +110,11 @@ resource "aws_instance" "llm" {
   vpc_security_group_ids      = [aws_security_group.llm.id]
   iam_instance_profile        = aws_iam_instance_profile.llm.name
   associate_public_ip_address = false
+
+  # Remove the root EBS volume when EC2 is terminated by terraform destroy.
+  root_block_device {
+    delete_on_termination = true
+  }
 
   user_data_base64 = base64encode(templatefile("${path.module}/user-data.sh.tftpl", {
     serve_script = base64gzip(file("${path.module}/Script/serve_qwen35_vllm.sh"))
