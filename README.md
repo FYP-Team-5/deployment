@@ -1,7 +1,8 @@
 # Qwen vLLM on EC2
 
 This repository provisions a `g4dn.xlarge` EC2 instance with Terraform and
-starts the Qwen3.5-9B base model plus its grading LoRA adapter with vLLM. The
+starts the Qwen3.5-9B base model plus its grading LoRA adapter with vLLM, as
+well as Docker Engine, Docker Compose, and Portainer CE. The
 default AWS Region is `us-east-1`. The API listens on the instance's loopback
 interface; connect through AWS Systems Manager Session Manager.
 
@@ -18,6 +19,7 @@ deployment/                         This Git repository
 ├── outputs.tf                      Instance ID, Region, and public IP
 ├── user-data.sh.tftpl              First-boot setup and systemd services
 ├── connect-vllm.sh                 Local SSM port-forward helper
+├── connect-portainer.sh             Local SSM Portainer HTTPS tunnel helper
 └── Script/
     ├── serve_qwen35_vllm.sh        Dependency setup and vLLM launch
     └── requirements-vllm.txt       Pinned Python serving packages
@@ -39,9 +41,9 @@ the two files under `Script/` into EC2 user data. It does not upload a local
 | Root storage | The AMI's default EBS root volume. The current `us-east-1` image specifies 40 GiB gp3; Terraform does not resize it. |
 | Working storage | The instance's 125 GB NVMe instance store, formatted as ext4 and mounted at `/mnt/llm-data`. Python environments, package caches, and model weights use it. |
 | Network | New VPC `10.42.0.0/16`, public subnet `10.42.1.0/24`, internet gateway, route table with a `0.0.0.0/0` route, and route table association. The instance gets a public IP for outbound downloads. |
-| Firewall | Security group with **no inbound rules** and outbound IPv4 access for downloads and SSM. vLLM binds to `127.0.0.1:8000`. |
+| Firewall | Security group with **no inbound rules** and outbound IPv4 access for downloads and SSM. vLLM binds to `127.0.0.1:8000`; Portainer publishes `127.0.0.1:9443:9443`. |
 | IAM | EC2 role and instance profile with AWS managed `AmazonSSMManagedInstanceCore` for Session Manager. |
-| Boot services | `llm-storage.service` mounts NVMe before `qwen-vllm.service` installs dependencies and starts vLLM. The serving service restarts on failure. |
+| Boot services | Cloud-init installs Docker Engine and its Compose plugin, enables Docker at boot, and starts Portainer CE with `--restart always`. `llm-storage.service` mounts NVMe before `qwen-vllm.service` installs dependencies and starts vLLM. The serving service restarts on failure. |
 | Tags | `Project=fyp-qwen-vllm`, `ManagedBy=terraform`, plus resource names. |
 
 The serving script installs `uv`, creates a managed Python 3.12 environment,
@@ -96,6 +98,49 @@ terraform output -raw instance_id
 Terraform state is local by default and ignored by Git. Keep it until teardown;
 losing it makes destruction harder. Applying the plan creates billable AWS
 resources.
+
+## Docker and Portainer on EC2
+
+On first boot, the startup script installs Docker from the official Ubuntu APT
+repository and launches Portainer CE. Docker and Portainer restart after a
+reboot. The `portainer_data` Docker volume resides on the instance's EBS root
+disk; its data survives reboots but not instance replacement or destruction.
+
+Portainer binds only to EC2 loopback on port 9443. The security group retains
+**no inbound rules**. Install the AWS CLI and its [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+on your computer, then run:
+
+```bash
+cd deployment
+bash ./connect-portainer.sh
+```
+
+With the SSM tunnel open, visit **https://127.0.0.1:9443**. Portainer initially
+uses a self-signed HTTPS certificate; check the localhost address before
+accepting the browser warning. Create the Portainer administrator account on
+first access. If local port 9443 is busy, run `bash ./connect-portainer.sh 9444`
+and visit `https://127.0.0.1:9444`.
+
+From an EC2 Session Manager shell, check Docker and Portainer:
+
+```bash
+whoami
+sudo whoami
+sudo systemctl status docker
+sudo docker ps
+sudo docker compose version
+sudo docker logs portainer
+```
+
+EC2 user-data runs as **root** and requires no `sudo`. The standard Ubuntu
+`ubuntu` user and default Session Manager `ssm-user` normally have sudo access.
+Do not add untrusted users to the `docker` group: Docker socket access grants
+root-equivalent privileges.
+
+**Existing deployments:** `main.tf` has `user_data_replace_on_change = true`.
+Applying this new startup script with `terraform apply` **replaces EC2**.
+That discards NVMe instance-store data and the instance's EBS root volume,
+including Portainer settings. Review `terraform plan` before applying.
 
 ## Connect from the local frontend and backend
 
