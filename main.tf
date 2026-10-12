@@ -97,6 +97,47 @@ resource "aws_iam_instance_profile" "llm" {
   role        = aws_iam_role.llm.name
 }
 
+# Explicitly managed log groups: seven-day retention and deletion on terraform destroy.
+resource "aws_cloudwatch_log_group" "cloud_init" {
+  name              = "/fyp/${var.name}/cloud-init"
+  retention_in_days = 7
+}
+
+resource "aws_cloudwatch_log_group" "vllm" {
+  name              = "/fyp/${var.name}/vllm"
+  retention_in_days = 7
+}
+
+# The agent can publish only to these Terraform-managed log groups.
+data "aws_iam_policy_document" "cloudwatch_logs" {
+  statement {
+    sid = "DescribeLogGroups"
+    actions = ["logs:DescribeLogGroups"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "PublishFypLogs"
+    actions = [
+      "logs:CreateLogStream",
+      "logs:DescribeLogStreams",
+      "logs:PutLogEvents"
+    ]
+    resources = [
+      trimsuffix(aws_cloudwatch_log_group.cloud_init.arn, ":*"),
+      "${trimsuffix(aws_cloudwatch_log_group.cloud_init.arn, ":*")}:*",
+      trimsuffix(aws_cloudwatch_log_group.vllm.arn, ":*"),
+      "${trimsuffix(aws_cloudwatch_log_group.vllm.arn, ":*")}:*"
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "cloudwatch_logs" {
+  name   = "${var.name}-cloudwatch-logs"
+  role   = aws_iam_role.llm.id
+  policy = data.aws_iam_policy_document.cloudwatch_logs.json
+}
+
 resource "aws_eip" "llm" {
   domain = "vpc"
 
@@ -118,7 +159,10 @@ resource "aws_instance" "llm" {
 
   user_data_base64 = base64encode(templatefile("${path.module}/user-data.sh.tftpl", {
     serve_script = base64gzip(file("${path.module}/Script/serve_qwen35_vllm.sh"))
-    requirements = base64gzip(file("${path.module}/Script/requirements-vllm.txt"))
+    requirements         = base64gzip(file("${path.module}/Script/requirements-vllm.txt"))
+    aws_region           = var.aws_region
+    cloud_init_log_group = aws_cloudwatch_log_group.cloud_init.name
+    vllm_log_group       = aws_cloudwatch_log_group.vllm.name
   }))
   user_data_replace_on_change = true
 
@@ -128,7 +172,7 @@ resource "aws_instance" "llm" {
 
   tags = { Name = var.name }
 
-  depends_on = [aws_route_table_association.public, aws_iam_role_policy_attachment.ssm]
+  depends_on = [aws_route_table_association.public, aws_iam_role_policy_attachment.ssm, aws_iam_role_policy.cloudwatch_logs]
 }
 
 resource "aws_eip_association" "llm" {
