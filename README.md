@@ -1,6 +1,6 @@
 # FYP EC2 deployment
 
-Terraform allocates a persistent Elastic IP and launches a GPU-backed Ubuntu 22.04 EC2 instance running Qwen3.5-9B via vLLM. The first-boot user-data script installs Docker Engine and Compose, clones the public [frontend](https://github.com/FYP-Team-5/frontend) and [backend](https://github.com/FYP-Team-5/backend) repositories, copies their .env.example files to .env, configures host addresses and generated secrets, then launches both Compose stacks. No Portainer is installed.
+Terraform allocates an Elastic IP for the lifetime of the Terraform stack and launches a GPU-backed Ubuntu 22.04 EC2 instance running Qwen3.5-9B via vLLM. The first-boot user-data script installs Docker Engine and Compose, clones the public [frontend](https://github.com/FYP-Team-5/frontend) and [backend](https://github.com/FYP-Team-5/backend) repositories, copies their .env.example files to .env, configures host addresses and generated secrets, then launches both Compose stacks. No Portainer is installed.
 
 ## Quick start
 
@@ -18,7 +18,7 @@ terraform output -raw public_ip
 - Backend: http://<ELASTIC_IP>:8002/health (TCP 8002 is allowed in the security group)
 - vLLM stays inaccessible from the internet (TCP 8000 has no ingress rule); access via `./connect-vllm.sh`.
 - PostgreSQL is bound to 127.0.0.1:5433 on the EC2 host.
-- Portainer is not installed. The legacy Terraform security-group configuration still contains an unused restricted TCP 9443 rule; remove it when updating firewall rules.
+- Portainer is not installed; TCP 9443 is not open.
 
 Initial deployment creates /opt/fyp/frontend/.env and /opt/fyp/backend/.env from each repo's .env.example, only if they do not already exist. The bootstrap script generates random PostgreSQL, JWT, staff-registration and API secrets. These are stored on EC2, not committed to Git. Both repository clones are public, so no GitHub authentication is needed.
 
@@ -56,16 +56,21 @@ The frontend Next.js build embeds NEXT_PUBLIC_* variables, so it must be rebuilt
 
 The EC2 instance uses 125 GB of ephemeral NVMe instance store for its LLM model caches, plus the AMI's EBS root volume for Docker and PostgreSQL. Replacing the EC2 instance destroys both, including database data and .env files. `main.tf` sets `user_data_replace_on_change = true`, so **Terraform changes to startup scripts cause instance replacement**. Check terraform plan carefully before apply.
 
-## Elastic IP lifecycle
+## Elastic IP and teardown lifecycle
 
-Terraform allocates `aws_eip.llm` and associates it separately with EC2 using `aws_eip_association.llm`. The EIP survives **EC2 replacement** within the Terraform configuration and does not incur a second automatically assigned IPv4 charge. `terraform output -raw public_ip` shows the fixed IP.
+Terraform allocates `aws_eip.llm` and associates it separately with EC2 using `aws_eip_association.llm`. The EIP survives EC2 replacement **within the same Terraform stack**, so the application's public address remains stable during an instance replacement. It is **released on `terraform destroy`**; a future `terraform apply` allocates a new EIP.
 
-The EIP has `prevent_destroy = true` to prevent accidental release. Consequently, a normal `terraform destroy` **will fail until you deliberately remove that lifecycle guard** and re-run your plan. Release the EIP when you no longer need it to avoid ongoing IPv4 charges. Replacing the EC2 instance still destroys its local EBS/NVMe storage.
+### Destroy everything provisioned by Terraform
 
-To remove the infrastructure when finished, remove the EIP's lifecycle protection from `main.tf`, inspect the plan, and then run:
+Run from the deployment repository with the same Terraform state and AWS region used during creation:
 
 ```bash
+terraform plan -destroy
 terraform destroy
 ```
 
+After a successful destroy, Terraform removes its managed EC2 instance, associated Elastic IP and allocation, security group, IAM role/policy attachment/instance profile, route table/association, Internet Gateway, subnet and VPC. The EC2 root EBS volume is configured with `delete_on_termination = true`, and the 125 GB NVMe instance store is ephemeral. The PostgreSQL Docker volume, Docker images, application `.env` files, and downloaded model caches are **not preserved** when the instance is terminated.
 
+**Caution:** This permanently deletes application/database data stored on EC2. Back up any required data before destroying the stack. The command only destroys resources tracked by this Terraform state; manually created AWS resources, external snapshots/backups, and resources outside this stack are unaffected. Check for any orphaned resources if a destroy fails partway through. The local Terraform state and repository files are not deleted by Terraform.
+
+`user_data_replace_on_change = true` remains enabled: edits to the rendered startup script can trigger EC2 replacement on `terraform apply`, deleting the EC2-local data, although the EIP remains allocated until the entire stack is destroyed.
