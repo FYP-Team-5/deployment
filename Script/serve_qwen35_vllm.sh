@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-${SCRIPT_DIR}/requirements-vllm.txt}"
 VENV_DIR="${VENV_DIR:-${SCRIPT_DIR}/.venv}"
 BOOTSTRAP_VENV="${BOOTSTRAP_VENV:-${SCRIPT_DIR}/.bootstrap}"
-INSTALL_DEPS="${VLLM_INSTALL_DEPS:-1}"
+INSTALL_DEPS="${FYP_VLLM_INSTALL_DEPS:-1}"
 
 # Both API model names share one base-model process. Selecting LORA_MODEL_NAME
 # activates the adapter; selecting BASE_MODEL_NAME leaves it disabled.
@@ -15,15 +15,19 @@ BASE_MODEL_NAME="${BASE_MODEL_NAME:-qwen35-9b-base}"
 LORA_MODEL_NAME="${LORA_MODEL_NAME:-qwen35-9b-grading-qlora}"
 LORA_PATH="${LORA_PATH:-SmuFypTeam5/GradingQlora}"
 
-HOST="${VLLM_HOST:-0.0.0.0}"
-PORT="${VLLM_PORT:-8000}"
-DTYPE="${VLLM_DTYPE:-auto}"
-MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-32768}"
-MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-4}"
-GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.55}"
-MAX_LORA_RANK="${VLLM_MAX_LORA_RANK:-16}"
-QUANTIZATION="${VLLM_QUANTIZATION:-bitsandbytes}"
-ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-1}"
+# Use FYP_VLLM_* for wrapper CLI options: vLLM itself reserves the VLLM_* prefix
+# and logs warnings for unknown entries. VLLM_USE_FLASHINFER_SAMPLER is a real vLLM env var.
+HOST="${FYP_VLLM_HOST:-0.0.0.0}"
+PORT="${FYP_VLLM_PORT:-8000}"
+DTYPE="${FYP_VLLM_DTYPE:-auto}"
+MAX_MODEL_LEN="${FYP_VLLM_MAX_MODEL_LEN:-8192}"
+MAX_NUM_SEQS="${FYP_VLLM_MAX_NUM_SEQS:-1}"
+GPU_MEMORY_UTILIZATION="${FYP_VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
+# vLLM 0.29 accepts 1, 8, 16, 32, 64, ... but not 48.
+# The grading LoRA uses rank 48; reserve rank 64 to serve it.
+MAX_LORA_RANK="${FYP_VLLM_MAX_LORA_RANK:-64}"
+QUANTIZATION="${FYP_VLLM_QUANTIZATION:-bitsandbytes}"
+ENFORCE_EAGER="${FYP_VLLM_ENFORCE_EAGER:-1}"
 USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
 PYTHON_BIN="${PYTHON_BIN:-${VENV_DIR}/bin/python}"
 VLLM_BIN="${VLLM_BIN:-${VENV_DIR}/bin/vllm}"
@@ -41,22 +45,24 @@ API model names:
 
 Important environment overrides:
   LORA_PATH                     Local adapter directory or Hugging Face repo ID
-    VLLM_HOST                     Bind host (default: 0.0.0.0)
-  VLLM_PORT                     Port (default: 8000)
-    VLLM_MAX_MODEL_LEN            Context limit (default: 32768)
-  VLLM_GPU_MEMORY_UTILIZATION   GPU fraction (default: 0.55)
-  VLLM_MAX_NUM_SEQS             Concurrent sequences (default: 4)
-  VLLM_QUANTIZATION             bitsandbytes or none (default: bitsandbytes)
-  VLLM_ENFORCE_EAGER            1 saves CUDA-graph memory; 0 enables graphs
+  FYP_VLLM_HOST                 Bind host (default: 0.0.0.0)
+  FYP_VLLM_PORT                 API port (default: 8000)
+  FYP_VLLM_MAX_MODEL_LEN        Context limit (default: 8192)
+  FYP_VLLM_GPU_MEMORY_UTILIZATION  GPU fraction (default: 0.90)
+  FYP_VLLM_MAX_NUM_SEQS         Concurrent sequences (default: 1)
+  FYP_VLLM_MAX_LORA_RANK        LoRA capacity (default: 64 for rank-48 adapter)
+  FYP_VLLM_DTYPE                Weight dtype (default: auto)
+  FYP_VLLM_QUANTIZATION         bitsandbytes or none (default: bitsandbytes)
+  FYP_VLLM_ENFORCE_EAGER        1 saves CUDA-graph memory; 0 enables graphs
   VLLM_USE_FLASHINFER_SAMPLER   0 avoids nvcc JIT; 1 enables it (default: 0)
-  VLLM_INSTALL_DEPS             Set to 0 to use an existing environment (default: 1)
+  FYP_VLLM_INSTALL_DEPS         Set to 0 to use an existing environment (default: 1)
   REQUIREMENTS_FILE             Pinned serving dependencies
   VENV_DIR                      Python 3.12 serving environment
 
 Examples:
   ./serve_qwen35_vllm.sh
   LORA_PATH=SmuFypTeam5/GradingQlora ./serve_qwen35_vllm.sh
-  VLLM_QUANTIZATION=none ./serve_qwen35_vllm.sh  # Opt out of 4-bit loading
+  FYP_VLLM_QUANTIZATION=none ./serve_qwen35_vllm.sh  # Opt out of 4-bit loading
 
 After startup, list both models with:
   curl http://127.0.0.1:8000/v1/models
@@ -72,7 +78,7 @@ fi
 
 install_dependencies() {
     [[ "$INSTALL_DEPS" == "1" ]] || {
-        [[ "$INSTALL_DEPS" == "0" ]] || { echo "ERROR: VLLM_INSTALL_DEPS must be 0 or 1." >&2; exit 2; }
+        [[ "$INSTALL_DEPS" == "0" ]] || { echo "ERROR: FYP_VLLM_INSTALL_DEPS must be 0 or 1." >&2; exit 2; }
         return
     }
 
@@ -135,7 +141,7 @@ elif [[ "$LORA_PATH" == /* || "$LORA_PATH" == ./* || "$LORA_PATH" == ../* ]]; th
 fi
 
 if [[ "$QUANTIZATION" != "none" && "$QUANTIZATION" != "bitsandbytes" ]]; then
-    echo "ERROR: VLLM_QUANTIZATION must be 'none' or 'bitsandbytes'." >&2
+    echo "ERROR: FYP_VLLM_QUANTIZATION must be 'none' or 'bitsandbytes'." >&2
     exit 2
 fi
 
@@ -143,7 +149,7 @@ if [[ "$QUANTIZATION" == "bitsandbytes" ]]; then
     if ! "$PYTHON_BIN" -c 'import importlib.metadata; importlib.metadata.version("vllm-bnb-plugin")' >/dev/null 2>&1; then
         echo "ERROR: bitsandbytes mode requires the vllm-bnb-plugin package." >&2
         echo "Install it with: uv pip install vllm-bnb-plugin" >&2
-        echo "To opt out of 4-bit loading, use VLLM_QUANTIZATION=none." >&2
+        echo "To opt out of 4-bit loading, use FYP_VLLM_QUANTIZATION=none." >&2
         exit 1
     fi
 fi
@@ -174,7 +180,7 @@ vllm_args=(
 if [[ "$ENFORCE_EAGER" == "1" ]]; then
     vllm_args+=(--enforce-eager)
 elif [[ "$ENFORCE_EAGER" != "0" ]]; then
-    echo "ERROR: VLLM_ENFORCE_EAGER must be 0 or 1." >&2
+    echo "ERROR: FYP_VLLM_ENFORCE_EAGER must be 0 or 1." >&2
     exit 2
 fi
 
