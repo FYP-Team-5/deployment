@@ -2,6 +2,24 @@
 set -Eeuo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
+
+# EC2 starts without an auto-assigned public IPv4 address. Wait for
+# Terraform to associate the EIP so that outbound internet access works.
+# Instance metadata is local and remains accessible without internet.
+for attempt in $(seq 1 120); do
+    token="$(curl -fsS --connect-timeout 2 --max-time 5 -X PUT \
+        -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
+        http://169.254.169.254/latest/api/token 2>/dev/null || true)"
+    if [[ -n "$token" ]]; then
+        eip="$(curl -fsS --connect-timeout 2 --max-time 5 \
+            -H "X-aws-ec2-metadata-token: $token" \
+            http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)"
+        [[ -n "$eip" ]] && break
+    fi
+    sleep 5
+done
+[[ -n "${eip:-}" ]] || { echo "ERROR: Elastic IP association not visible in EC2 metadata" >&2; exit 1; }
+
 apt-get update
 apt-get install -y python3-venv ca-certificates curl git openssl e2fsprogs util-linux
 
@@ -62,7 +80,7 @@ set_env() {
     fi
 }
 
-# EC2 requires IMDSv2 and assigns a public IP to this instance.
+# Read the associated Elastic IP from IMDSv2 (no auto-assigned public IPv4).
 token="$(curl --fail --silent --show-error --retry 4 \
     --request PUT http://169.254.169.254/latest/api/token \
     --header 'X-aws-ec2-metadata-token-ttl-seconds: 60')"
