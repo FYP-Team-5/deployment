@@ -8,6 +8,6 @@ output "region" {
 }
 
 output "public_ip" {
-  description = "Outbound access only; the security group has no inbound rules."
-  value       = aws_instance.llm.public_ip
+  description = "Static Elastic IP for the frontend and backend."
+  value       = aws_eip.llm.public_ip
 }
