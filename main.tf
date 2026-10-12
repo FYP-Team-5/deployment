@@ -39,10 +39,24 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# AWS-maintained source addresses for browser-based EC2 Instance Connect.
+# Avoid exposing SSH to all internet hosts.
+data "aws_ec2_managed_prefix_list" "instance_connect" {
+  name = "com.amazonaws.${var.aws_region}.ec2-instance-connect"
+}
+
 resource "aws_security_group" "llm" {
   name_prefix = "${var.name}-"
   description = "Qwen vLLM with public frontend and backend access"
   vpc_id      = aws_vpc.llm.id
+
+  ingress {
+    description     = "SSH via EC2 Instance Connect browser"
+    from_port       = 22
+    to_port         = 22
+    protocol        = "tcp"
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.instance_connect.id]
+  }
 
   ingress {
     description = "Public FastAPI backend"
