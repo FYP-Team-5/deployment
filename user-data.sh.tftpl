@@ -65,30 +65,25 @@ CLOUDWATCH
   -c file:/opt/aws/amazon-cloudwatch-agent/etc/fyp-logs.json -s
 
 
-# Install Docker Engine and Compose from Docker's official Ubuntu repository.
-# Cloud-init user data runs as root; no sudo is needed here.
-for package in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
-    if dpkg -s "$package" >/dev/null 2>&1; then
-        apt-get remove -y "$package"
-    fi
-done
+# The AWS Deep Learning AMI already bundles Docker Engine and Compose v2.
+# Use the AMI's installation instead of modifying its Docker APT sources.
+if ! command -v docker >/dev/null 2>&1; then
+    echo "ERROR: Docker is missing from the selected AMI." >&2
+    exit 1
+fi
+if ! docker compose version >/dev/null 2>&1; then
+    echo "ERROR: Docker Compose v2 plugin is missing from the selected AMI." >&2
+    exit 1
+fi
 
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-chmod a+r /etc/apt/keyrings/docker.asc
-
-. /etc/os-release
-cat > /etc/apt/sources.list.d/docker.sources <<DOCKER_SOURCES
-Types: deb
-URIs: https://download.docker.com/linux/ubuntu
-Suites: $VERSION_CODENAME
-Components: stable
-Signed-By: /etc/apt/keyrings/docker.asc
-DOCKER_SOURCES
-
-apt-get update
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable --now docker
+if ! docker info >/dev/null 2>&1; then
+    echo "ERROR: Docker daemon is not available after startup." >&2
+    exit 1
+fi
+
+echo "Reusing AMI Docker: $(docker --version)"
+echo "Reusing AMI Compose: $(docker compose version)"
 
 install -d -o ubuntu -g ubuntu /opt/qwen-vllm/Script
 echo '${serve_script}' | base64 -d | gzip -d > /opt/qwen-vllm/Script/serve_qwen35_vllm.sh
