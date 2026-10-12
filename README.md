@@ -2,6 +2,16 @@
 
 Terraform allocates an Elastic IP for the lifetime of the Terraform stack and launches a GPU-backed Ubuntu 22.04 EC2 instance running Qwen3.5-9B via vLLM. The first-boot user-data script installs Docker Engine and Compose, clones the public [frontend](https://github.com/FYP-Team-5/frontend) and [backend](https://github.com/FYP-Team-5/backend) repositories, copies their .env.example files to .env, configures host addresses and generated secrets, then launches both Compose stacks. No Portainer is installed.
 
+## EC2 Instance Connect (browser SSH)
+
+The EC2 security group permits inbound TCP 22 only from the AWS-maintained regional EC2 Instance Connect IPv4 prefix list (`com.amazonaws.<region>.ec2-instance-connect`), **not** from the entire internet. Terraform looks up this AWS-managed prefix list rather than creating it.
+
+In the AWS Console, navigate to **EC2 → Instances → select the instance → Connect → EC2 Instance Connect**. Use the **Public IP** connection type, the instance Elastic IP and the username `ubuntu`, then select **Connect**.
+
+Ubuntu 22.04 AWS AMIs normally include the EC2 Instance Connect integration. Browser login also requires the connecting IAM identity to have `ec2-instance-connect:SendSSHPublicKey` permission; this permission belongs to your console identity, not the EC2 instance role. To troubleshoot SSH, use Session Manager and run `sudo systemctl status ssh` and `dpkg -s ec2-instance-connect`.
+
+This ingress rule enables browser-based Instance Connect. Direct SSH from your own terminal requires a separate security-group ingress rule for your public IP (/32), plus SSH key authentication.
+
 ## Quick start
 
 Requirements: Terraform 1.5+, AWS CLI with EC2/VPC/IAM/SSM permissions, Session Manager plugin, and a g4dn.xlarge quota in us-east-1.
