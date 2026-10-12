@@ -18,7 +18,7 @@ for attempt in $(seq 1 120); do
     fi
     sleep 5
 done
-[[ -n "${eip:-}" ]] || { echo "ERROR: Elastic IP association not visible in EC2 metadata" >&2; exit 1; }
+[[ -n "$eip" ]] || { echo "ERROR: Elastic IP association not visible in EC2 metadata" >&2; exit 1; }
 
 apt-get update
 apt-get install -y python3-venv ca-certificates curl git openssl e2fsprogs util-linux
