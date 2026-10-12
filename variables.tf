@@ -9,3 +9,9 @@ variable "name" {
   type        = string
   default     = "fyp-qwen-vllm"
 }
+
+variable "portainer_allowed_cidr" {
+  description = "Legacy admin CIDR required by existing Terraform security group; Portainer is not installed."
+  type        = string
+  default     = "127.0.0.1/32"
+}
