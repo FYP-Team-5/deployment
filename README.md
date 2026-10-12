@@ -15,10 +15,10 @@ terraform output -raw public_ip
 ```
 
 - Frontend: http://<EC2_PUBLIC_IP>:3000
-- Backend: http://<EC2_PUBLIC_IP>:8002/health
+- Backend: http://<EC2_PUBLIC_IP>:8002/health (requires AWS security-group TCP 8002 ingress, which is not yet configured)
 - vLLM stays inaccessible from the internet (TCP 8000 has no ingress rule); access via `./connect-vllm.sh`.
 - PostgreSQL is bound to 127.0.0.1:5433 on the EC2 host.
-- Portainer is not used, and port 9443 is not opened.
+- Portainer is not installed. The legacy Terraform security-group configuration still contains an unused restricted TCP 9443 rule; remove it when updating firewall rules.
 
 Initial deployment creates /opt/fyp/frontend/.env and /opt/fyp/backend/.env from each repo's .env.example, only if they do not already exist. The bootstrap script generates random PostgreSQL, JWT, staff-registration and API secrets. These are stored on EC2, not committed to Git. Both repository clones are public, so no GitHub authentication is needed.
 
@@ -52,7 +52,7 @@ The frontend Next.js build embeds NEXT_PUBLIC_* variables, so it must be rebuilt
 
 ## Important security and lifecycle notes
 
-**This is a development/demo HTTP deployment, not production-ready.** Both port 3000 and 8002 are internet-accessible without TLS. The frontend's NEXT_PUBLIC_GRADING_API_KEY is embedded in browser JavaScript and cannot be treated as a secret. Add HTTPS and strong server-side authorization before production use. The startup process does not deploy any separate RAG service, so frontend RAG features still require configuration.
+**This is a development/demo HTTP deployment, not production-ready.** Port 3000 is accessible without TLS; port 8002 is currently blocked by the AWS security group until an inbound rule is configured. The frontend's NEXT_PUBLIC_GRADING_API_KEY is embedded in browser JavaScript and cannot be treated as a secret. Add HTTPS and strong server-side authorization before production use. The startup process does not deploy any separate RAG service, so frontend RAG features still require configuration.
 
 The EC2 instance uses 125 GB of ephemeral NVMe instance store for its LLM model caches, plus the AMI's EBS root volume for Docker and PostgreSQL. Replacing the EC2 instance destroys both, including database data and .env files. `main.tf` sets `user_data_replace_on_change = true`, so **Terraform changes to startup scripts cause instance replacement**. Check terraform plan carefully before apply.
 
@@ -61,3 +61,7 @@ To remove the infrastructure:
 ```bash
 terraform destroy
 ```
+
+## Outstanding network configuration
+
+The Terraform `main.tf` firewall change was not applied. The existing security group permits frontend 3000 but **does not permit inbound 8002**, so browser-based frontend API calls to the public IP will fail. To complete deployment, add a TCP/8002 ingress rule restricted to your intended clients (and preferably serve both applications behind HTTPS). The legacy 9443 rule can be deleted. The new bootstrap does not launch Portainer.
