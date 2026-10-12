@@ -41,15 +41,15 @@ resource "aws_route_table_association" "public" {
 
 resource "aws_security_group" "llm" {
   name_prefix = "${var.name}-"
-  description = "Qwen vLLM: public frontend and restricted Portainer with SSM access"
+  description = "Qwen vLLM with public frontend and backend access"
   vpc_id      = aws_vpc.llm.id
 
   ingress {
-    description = "Portainer HTTPS dashboard - administrators only"
-    from_port   = 9443
-    to_port     = 9443
+    description = "Public FastAPI backend"
+    from_port   = 8002
+    to_port     = 8002
     protocol    = "tcp"
-    cidr_blocks = [var.portainer_allowed_cidr]
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   ingress {
