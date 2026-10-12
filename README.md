@@ -3,8 +3,9 @@
 This repository provisions a `g4dn.xlarge` EC2 instance with Terraform and
 starts the Qwen3.5-9B base model plus its grading LoRA adapter with vLLM, as
 well as Docker Engine, Docker Compose, and Portainer CE. The
-default AWS Region is `us-east-1`. The API listens on the instance's loopback
-interface; connect through AWS Systems Manager Session Manager.
+default AWS Region is `us-east-1`. The vLLM API listens on the instance's loopback interface; connect through AWS
+Systems Manager Session Manager. The frontend port 3000 is open to the public;
+Portainer HTTPS port 9443 is restricted to a trusted administrator CIDR.
 
 ## Project structure
 
@@ -41,7 +42,7 @@ the two files under `Script/` into EC2 user data. It does not upload a local
 | Root storage | The AMI's default EBS root volume. The current `us-east-1` image specifies 40 GiB gp3; Terraform does not resize it. |
 | Working storage | The instance's 125 GB NVMe instance store, formatted as ext4 and mounted at `/mnt/llm-data`. Python environments, package caches, and model weights use it. |
 | Network | New VPC `10.42.0.0/16`, public subnet `10.42.1.0/24`, internet gateway, route table with a `0.0.0.0/0` route, and route table association. The instance gets a public IP for outbound downloads. |
-| Firewall | Security group with **no inbound rules** and outbound IPv4 access for downloads and SSM. vLLM binds to `127.0.0.1:8000`; Portainer publishes `127.0.0.1:9443:9443`. |
+| Firewall | Inbound TCP 3000 is publicly reachable; TCP 9443 is restricted to `portainer_allowed_cidr`. Outbound access supports downloads and SSM. vLLM stays on `127.0.0.1:8000`. |
 | IAM | EC2 role and instance profile with AWS managed `AmazonSSMManagedInstanceCore` for Session Manager. |
 | Boot services | Cloud-init installs Docker Engine and its Compose plugin, enables Docker at boot, and starts Portainer CE with `--restart always`. `llm-storage.service` mounts NVMe before `qwen-vllm.service` installs dependencies and starts vLLM. The serving service restarts on failure. |
 | Tags | `Project=fyp-qwen-vllm`, `ManagedBy=terraform`, plus resource names. |
@@ -90,7 +91,8 @@ change Regions.
 ```bash
 cd deployment
 terraform init
-terraform plan -out=llm.tfplan
+ADMIN_IP="$(curl -fsSL https://checkip.amazonaws.com | tr -d '\n')"
+terraform plan -var="portainer_allowed_cidr=${ADMIN_IP}/32" -out=llm.tfplan
 terraform apply llm.tfplan
 terraform output -raw instance_id
 ```
@@ -106,8 +108,20 @@ repository and launches Portainer CE. Docker and Portainer restart after a
 reboot. The `portainer_data` Docker volume resides on the instance's EBS root
 disk; its data survives reboots but not instance replacement or destruction.
 
-Portainer binds only to EC2 loopback on port 9443. The security group retains
-**no inbound rules**. Install the AWS CLI and its [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+Portainer publishes HTTPS on `0.0.0.0:9443`, but the AWS security group
+limits inbound access to the required `portainer_allowed_cidr` Terraform
+variable. The build instructions above pass your current public IPv4 address
+as a `/32`. If your IP changes, update the variable and reapply Terraform;
+the security-group rule changes without replacing the instance. **Never expose
+Portainer to `0.0.0.0/0`**. This dashboard controls the Docker host.
+
+For direct access from that approved IP, open
+**https://<EC2_PUBLIC_IP>:9443** (retrieve it with
+`terraform output -raw public_ip`). The browser will initially display a
+warning for Portainer's self-signed HTTPS certificate; verify the instance
+address before proceeding.
+
+For a tunnel instead, install the AWS CLI and its [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
 on your computer, then run:
 
 ```bash
@@ -115,10 +129,8 @@ cd deployment
 bash ./connect-portainer.sh
 ```
 
-With the SSM tunnel open, visit **https://127.0.0.1:9443**. Portainer initially
-uses a self-signed HTTPS certificate; check the localhost address before
-accepting the browser warning. Create the Portainer administrator account on
-first access. If local port 9443 is busy, run `bash ./connect-portainer.sh 9444`
+With the SSM tunnel open, visit **https://127.0.0.1:9443**. Create the
+Portainer administrator account on first access. If local port 9443 is busy, run `bash ./connect-portainer.sh 9444`
 and visit `https://127.0.0.1:9444`.
 
 From an EC2 Session Manager shell, check Docker and Portainer:
@@ -130,7 +142,14 @@ sudo systemctl status docker
 sudo docker ps
 sudo docker compose version
 sudo docker logs portainer
+sudo docker logs portainer 2>&1 | grep -i token
 ```
+
+Portainer may require a first-run setup token printed in its container logs.
+Retrieve it with the command above and enter it on the initial admin setup
+screen. Finish the first-run admin setup promptly (typically within five
+minutes); if the token times out, run `sudo docker restart portainer` and
+read the new token. Do not disclose this setup token.
 
 EC2 user-data runs as **root** and requires no `sudo`. The standard Ubuntu
 `ubuntu` user and default Session Manager `ssm-user` normally have sudo access.
@@ -141,6 +160,31 @@ root-equivalent privileges.
 Applying this new startup script with `terraform apply` **replaces EC2**.
 That discards NVMe instance-store data and the instance's EBS root volume,
 including Portainer settings. Review `terraform plan` before applying.
+
+## Public frontend port
+
+The EC2 security group allows inbound TCP **3000** from `0.0.0.0/0`.
+The separate [frontend repository](https://github.com/FYP-Team-5/frontend)
+uses the same port and publishes it on all interfaces by default. To start
+that frontend on the EC2 host, you must also deploy the frontend application:
+
+```bash
+git clone https://github.com/FYP-Team-5/frontend.git
+cd frontend
+docker compose up --build -d
+```
+
+Once the container is running, use `http://<EC2_PUBLIC_IP>:3000`.
+The deployment startup script installs Docker and Portainer only; it does **not**
+automatically clone or launch the frontend. For a production deployment, put
+the public frontend behind HTTPS (for example, a reverse proxy or load balancer)
+rather than serving plain HTTP on port 3000.
+
+**Browser API caveat:** The frontend currently builds with
+`NEXT_PUBLIC_API_URL=http://localhost:8002` unless you override it. For
+remote visitors, `localhost` means **their own computer**. Set this to a
+browser-reachable HTTPS backend endpoint before building; port 8002 is **not**
+opened by these changes. Do not expose backend secrets through `NEXT_PUBLIC_*`.
 
 ## Connect from the local frontend and backend
 
