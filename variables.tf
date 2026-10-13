@@ -1,5 +1,5 @@
 variable "aws_region" {
-  description = "AWS Region for the GPU instance. Check g4dn.xlarge capacity and quotas in this Region."
+  description = "AWS Region for the GPU instance. Check g5.xlarge capacity and quotas in this Region."
   type        = string
   default     = "us-east-1"
 }

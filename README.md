@@ -14,7 +14,7 @@ This ingress rule enables browser-based Instance Connect. Direct SSH from your o
 
 ## Quick start
 
-Requirements: Terraform 1.5+, AWS CLI with EC2/VPC/IAM/SSM permissions, Session Manager plugin, and a g4dn.xlarge quota in us-east-1.
+Requirements: Terraform 1.5+, AWS CLI with EC2/VPC/IAM/SSM permissions, Session Manager plugin, and a g5.xlarge quota in us-east-1.
 
 ```bash
 cd deployment
@@ -60,6 +60,8 @@ The security-group description refers to **public frontend (TCP 3000) and backen
 
 ## vLLM configuration
 
+Thinking is disabled by default for both the base model and grading LoRA with `--default-chat-template-kwargs '{"enable_thinking": false}'`, as described in the [vLLM documentation](https://docs.vllm.ai/en/v0.29.0/features/reasoning_outputs/#server-level-default-chat-template-kwargs). Requests can explicitly override this with `chat_template_kwargs`.
+
 The GradingQlora adapter uses LoRA rank **48**. vLLM 0.29.0 requires setting `--max-lora-rank` to the supported capacity **64**, not 48. The serving wrapper uses `FYP_VLLM_*` variables for command-line settings to avoid vLLM warnings from unrecognized `VLLM_*` variables. These include `FYP_VLLM_HOST=0.0.0.0`, `FYP_VLLM_MAX_MODEL_LEN=8192`, `FYP_VLLM_GPU_MEMORY_UTILIZATION=0.90`, `FYP_VLLM_MAX_NUM_SEQS=1`, and `FYP_VLLM_MAX_LORA_RANK=64`. The wrapper retains `VLLM_USE_FLASHINFER_SAMPLER`, which is passed to vLLM itself. This deployment keeps bitsandbytes quantization and eager mode enabled.
 
 Do not mistake changing the wrapper's default for updating an already running EC2 instance. The systemd unit on the existing EC2 host needs updating separately or the instance needs replacement. In this Terraform stack `user_data_replace_on_change=true`, so check `terraform plan` before applying: replacing EC2 destroys instance-local data.
@@ -94,7 +96,7 @@ The frontend Next.js build embeds NEXT_PUBLIC_* variables, so it must be rebuilt
 
 **This is a development/demo HTTP deployment, not production-ready.** Both port 3000 and port 8002 are publicly accessible without TLS. The frontend's NEXT_PUBLIC_GRADING_API_KEY is embedded in browser JavaScript and cannot be treated as a secret. Add HTTPS and strong server-side authorization before production use. The startup process does not deploy any separate RAG service, so frontend RAG features still require configuration.
 
-The EC2 instance uses 125 GB of ephemeral NVMe instance store for its LLM model caches, plus the AMI's EBS root volume for Docker and PostgreSQL. The Deep Learning AMI's `dlami-nvme.service` provisions the instance store as LVM and mounts ext4 at `/opt/dlami/nvme`. Our `llm-storage.service` runs afterward and bind-mounts `/opt/dlami/nvme/llm-data` at `/mnt/llm-data`; it must not format the LVM physical volume. Replacing the EC2 instance destroys both, including database data and .env files. `main.tf` sets `user_data_replace_on_change = true`, so **Terraform changes to startup scripts cause instance replacement**. Check terraform plan carefully before apply.
+The EC2 instance uses 250 GB of ephemeral NVMe instance store for its LLM model caches, plus the AMI's EBS root volume for Docker and PostgreSQL. The Deep Learning AMI's `dlami-nvme.service` provisions the instance store as LVM and mounts ext4 at `/opt/dlami/nvme`. Our `llm-storage.service` runs afterward and bind-mounts `/opt/dlami/nvme/llm-data` at `/mnt/llm-data`; it must not format the LVM physical volume. Replacing the EC2 instance destroys both, including database data and .env files. `main.tf` sets `user_data_replace_on_change = true`, so **Terraform changes to startup scripts cause instance replacement**. Check terraform plan carefully before apply.
 
 ## Elastic IP and teardown lifecycle
 
@@ -109,7 +111,7 @@ terraform plan -destroy
 terraform destroy
 ```
 
-After a successful destroy, Terraform removes its two CloudWatch log groups (including stored logs), managed EC2 instance, associated Elastic IP and allocation, security group, IAM role/policy attachment/instance profile, route table/association, Internet Gateway, subnet and VPC. The EC2 root EBS volume is configured with `delete_on_termination = true`, and the 125 GB NVMe instance store is ephemeral. The PostgreSQL Docker volume, Docker images, application `.env` files, and downloaded model caches are **not preserved** when the instance is terminated.
+After a successful destroy, Terraform removes its two CloudWatch log groups (including stored logs), managed EC2 instance, associated Elastic IP and allocation, security group, IAM role/policy attachment/instance profile, route table/association, Internet Gateway, subnet and VPC. The EC2 root EBS volume is configured with `delete_on_termination = true`, and the 250 GB NVMe instance store is ephemeral. The PostgreSQL Docker volume, Docker images, application `.env` files, and downloaded model caches are **not preserved** when the instance is terminated.
 
 **Caution:** This permanently deletes application/database data stored on EC2. Back up any required data before destroying the stack. The command only destroys resources tracked by this Terraform state; manually created AWS resources, external snapshots/backups, and resources outside this stack are unaffected. Check for any orphaned resources if a destroy fails partway through. The local Terraform state and repository files are not deleted by Terraform.
 

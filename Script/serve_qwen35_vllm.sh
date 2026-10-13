@@ -68,6 +68,7 @@ After startup, list both models with:
   curl http://127.0.0.1:8000/v1/models
 
 Use the model field in an OpenAI-compatible request to select either variant.
+Thinking is disabled by default for both variants.
 EOF
 }
 
@@ -166,6 +167,7 @@ export VLLM_USE_FLASHINFER_SAMPLER="$USE_FLASHINFER_SAMPLER"
 vllm_args=(
     serve "$BASE_MODEL"
     --served-model-name "$BASE_MODEL_NAME"
+    --default-chat-template-kwargs '{"enable_thinking": false}'
     --enable-lora
     --lora-modules "${LORA_MODEL_NAME}=${LORA_PATH}"
     --max-lora-rank "$MAX_LORA_RANK"

@@ -160,7 +160,7 @@ resource "aws_eip" "llm" {
 
 resource "aws_instance" "llm" {
   ami                         = data.aws_ssm_parameter.gpu_ami.value
-  instance_type               = "g4dn.xlarge"
+  instance_type               = "g5.xlarge"
   subnet_id                   = aws_subnet.llm.id
   vpc_security_group_ids      = [aws_security_group.llm.id]
   iam_instance_profile        = aws_iam_instance_profile.llm.name
