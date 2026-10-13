@@ -30,7 +30,7 @@ terraform output -raw public_ip
 - PostgreSQL is bound to 127.0.0.1:5433 on the EC2 host.
 - Portainer is not installed; TCP 9443 is not open.
 
-Initial deployment creates /opt/fyp/frontend/.env and /opt/fyp/backend/.env from each repo's .env.example, only if they do not already exist. The bootstrap script generates random PostgreSQL, JWT, staff-registration and API secrets. These are stored on EC2, not committed to Git. Both repository clones are public, so no GitHub authentication is needed.
+Initial deployment creates /opt/fyp/frontend/.env and /opt/fyp/backend/.env from each repo's .env.example, only if they do not already exist. The bootstrap script generates random PostgreSQL, JWT and API secrets, which are stored on EC2, not committed to Git. It sets STAFF_REGISTRATION_KEY to the literal value `key`. Both repository clones are public, so no GitHub authentication is needed.
 
 The frontend receives NEXT_PUBLIC_API_URL pointing to the instance's Elastic IP and port 8002. EC2 does not request an automatic public IPv4 address (both instance and subnet auto-assign are disabled). The initial bootstrap waits for Elastic IP association before downloading packages. The backend uses the host's vLLM endpoint at host.docker.internal:8000 with the qwen35-9b-grading-qlora model. vLLM binds to the EC2 host interfaces but is blocked externally by the EC2 security group. Both Docker Compose applications have restart policies.
 
