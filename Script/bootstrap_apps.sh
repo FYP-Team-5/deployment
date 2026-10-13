@@ -40,7 +40,7 @@ frontend_env=/opt/fyp/frontend/.env
 # Generate unique boot-time secrets; do not store them in Git or Terraform state.
 set_env "$backend_env" POSTGRES_PASSWORD "$(openssl rand -hex 24)"
 set_env "$backend_env" JWT_SECRET "$(openssl rand -hex 32)"
-set_env "$backend_env" STAFF_REGISTRATION_KEY ""
+set_env "$backend_env" STAFF_REGISTRATION_KEY "key"
 api_key="$(openssl rand -hex 32)"
 set_env "$backend_env" API_KEY "$api_key"
 set_env "$backend_env" POSTGRES_PORT "127.0.0.1:5433"
