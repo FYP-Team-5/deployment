@@ -10,20 +10,51 @@ import boto3
 import nbformat
 
 
-def check_dataset(path):
+def normalize_dataset(path):
+    """Keep binary full-credit/zero-credit examples, record skipped partial credit."""
     import csv
-    count = 0
+    import math
+    result_path = path.with_name("normalized.csv")
+    retained = []
+    counts = {"source_rows": 0, "skipped_partial_credit": 0, "skipped_missing_answer": 0}
     with path.open(encoding="utf-8-sig", newline="") as stream:
-        for row in csv.DictReader(stream):
-            count += 1
+        reader = csv.DictReader(stream)
+        fields = reader.fieldnames
+        required = {"question", "desired_answer", "student_answer",
+                    "criteria[]", "criteria_score[]", "criteria_max_score[]", "student_score"}
+        if not fields or not required.issubset(fields):
+            raise ValueError("Incorrect training CSV columns")
+        for row in reader:
+            counts["source_rows"] += 1
             scores = json.loads(row["criteria_score[]"])
-            if not scores or any(type(v) is not int or v not in (0, 1) for v in scores):
-                raise ValueError(f"Row {count} has nonbinary criterion labels")
+            maxima = json.loads(row["criteria_max_score[]"])
+            if not scores or len(scores) != len(maxima):
+                raise ValueError("Misaligned criterion scores/maxima")
             if not row["question"].strip() or not row["desired_answer"].strip():
-                raise ValueError(f"Row {count} has a missing question or answer")
-    if not count:
-        raise ValueError("Training CSV is empty")
-    return count
+                counts["skipped_missing_answer"] += 1
+                continue
+            binary = []
+            for score, maximum in zip(scores, maxima):
+                if not isinstance(score, (int, float)) or not isinstance(maximum, (int, float)):
+                    raise ValueError("Non-numeric criterion values")
+                if math.isclose(score, 0, abs_tol=1e-7):
+                    binary.append(0)
+                elif math.isclose(score, maximum, abs_tol=1e-7):
+                    binary.append(1)
+                else:
+                    counts["skipped_partial_credit"] += 1
+                    break
+            else:
+                row["criteria_score[]"] = json.dumps(binary)
+                retained.append(row)
+    if len({row["question"].strip() for row in retained}) < 10:
+        raise ValueError("Not enough compatible unique questions to split 80/10/10")
+    with result_path.open("w", encoding="utf-8", newline="") as target:
+        writer = csv.DictWriter(target, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(retained)
+    counts["training_rows"] = len(retained)
+    return result_path, counts
 
 
 def run(args):
@@ -31,7 +62,7 @@ def run(args):
     actual = hashlib.sha256(data.read_bytes()).hexdigest()
     if actual != args.checksum:
         raise ValueError("Training CSV checksum mismatch")
-    check_dataset(data)
+    normalized, dataset_stats = normalize_dataset(data)
     notebook = nbformat.read(args.notebook, as_version=4)
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -52,7 +83,7 @@ def run(args):
         if number == 6:
             scope.update({
                 "MODEL_ID": "Qwen/Qwen3.5-9B",
-                "DATASET_PATH": str(data.resolve()),
+                "DATASET_PATH": str(normalized.resolve()),
                 "OUTPUT_DIR": str(output),
                 "RUN_TRAINING": True,
                 "RUN_TEST_EVALUATION": True,
@@ -92,6 +123,7 @@ def run(args):
         "status": "completed",
         "dataset_checksum": args.checksum,
         "dataset_rows": len(scope["records"]),
+        "dataset_stats": dataset_stats,
         "base_model": "Qwen/Qwen3.5-9B",
         "seed": 42,
         "lora_rank": 48,
