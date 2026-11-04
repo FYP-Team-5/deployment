@@ -20,7 +20,9 @@ def handler(event, context):
     if action == "complete":
         return execution.finish(event["job"])
     if action == "stop":
-        return execution.stop()
+        result = execution.stop()
+        transfer.unlock(event["job"]["checksum"])
+        return result
     if action == "fail":
         job = event.get("job") or {}
         log.error("Training workflow failed (version=%s)", job.get("version_id"))
