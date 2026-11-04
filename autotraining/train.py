@@ -119,6 +119,8 @@ def run(args):
     # Null out non-finite values to produce strict JSON.
     def clean(value):
         import math
+        if hasattr(value, "item"):
+            return clean(value.item())
         if isinstance(value, float) and not math.isfinite(value):
             return None
         if isinstance(value, dict):
