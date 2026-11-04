@@ -79,7 +79,15 @@ def run(args):
                 'hf_token = os.environ["HF_TOKEN"]',
                 'hf_token = os.environ.get("HF_TOKEN", "")',
             )
+        if number == 14:
+            code = code.replace(
+                'print(dataset[0]["prompt"])',
+                'print("Training prompt created; content redacted")',
+            )
         exec(compile(code, f"notebook_cell_{number}", "exec"), scope)
+        if number == 4:
+            # Notebook preview tables contain actual student responses.
+            scope["display"] = lambda *_: print("Notebook output redacted")
         if number == 6:
             scope.update({
                 "MODEL_ID": "Qwen/Qwen3.5-9B",
