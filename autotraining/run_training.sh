@@ -15,8 +15,10 @@ mkdir -p "$WORK"
 cd "$WORK"
 command -v nvidia-smi >/dev/null
 nvidia-smi
-command -v aws >/dev/null
-command -v git >/dev/null
+if ! command -v aws >/dev/null || ! command -v gcc >/dev/null || ! command -v git >/dev/null; then
+    apt-get update
+    apt-get install -y awscli build-essential git python3-venv
+fi
 command -v python3 >/dev/null
 
 aws s3 cp "s3://$BUCKET/scripts/train.py" train.py --region "$REGION" >/dev/null
@@ -29,8 +31,12 @@ fi
 git -C model fetch --depth 1 origin "$MODEL_COMMIT"
 git -C model checkout --force FETCH_HEAD
 
-if [[ ! -d .venv ]]; then
-    python3 -m venv .venv
+if [[ ! -x .venv/bin/python ]]; then
+    if ! python3 -m venv .venv; then
+        apt-get update
+        apt-get install -y python3-venv
+        python3 -m venv .venv
+    fi
 fi
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python train.py \
