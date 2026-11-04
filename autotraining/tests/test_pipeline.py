@@ -1,5 +1,6 @@
 """Offline regression tests; no AWS credentials or GPU are used."""
 import csv
+import io
 import json
 import os
 import sys
@@ -98,6 +99,31 @@ class CoordinatorTests(unittest.TestCase):
         with patch.object(execution, "SSM", Offline()):
             self.assertEqual(execution.launch({"checksum": "a" * 64}, 4),
                              {"ready": False, "attempt": 5})
+
+    def test_poll_reports_success_and_failure(self):
+        with patch.object(execution, "read_command", return_value={"Status": "Success"}):
+            self.assertTrue(execution.poll("dummy")["done"])
+        with patch.object(execution, "read_command", return_value={"Status": "Failed"}):
+            with self.assertRaises(RuntimeError):
+                execution.poll("dummy")
+
+    def test_invalid_candidate_cannot_become_latest(self):
+        class InvalidS3:
+            def get_object(self, **kwargs):
+                return {"Body": io.BytesIO(b'{"status":"incomplete"}')}
+        class DB:
+            def put_item(self, **kwargs):
+                raise AssertionError("Invalid candidate was accepted")
+        with patch.object(execution, "S3", InvalidS3()), patch.object(execution, "DB", DB()):
+            with self.assertRaises(ValueError):
+                execution.finish({"checksum": "a" * 64, "version_id": "f" * 36})
+
+    def test_failed_stop_keeps_dataset_lock(self):
+        with patch.object(execution, "stop", side_effect=RuntimeError("EC2 API unavailable")), \
+             patch.object(execution, "unlock") as release:
+            with self.assertRaises(RuntimeError):
+                execution.failure({"checksum": "a" * 64})
+            release.assert_not_called()
 
     def test_stop_releases_lock_after_ec2_stop(self):
         trace = []
