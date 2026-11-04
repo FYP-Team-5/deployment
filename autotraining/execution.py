@@ -70,7 +70,6 @@ def finish(job):
         "pk": "latest", "checksum": checksum, "version_id": job["version_id"],
         "adapter_uri": result["adapter_uri"], "completed_at": int(time.time()),
     })
-    unlock(checksum)
     return {"status": "candidate_saved"}
 
 
@@ -82,7 +81,6 @@ def stop():
 
 
 def failure(job):
-    try:
-        return stop()
-    finally:
-        unlock(job.get("checksum", ""))
+    result = stop()
+    unlock(job.get("checksum", ""))
+    return result
