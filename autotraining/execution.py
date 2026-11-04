@@ -5,7 +5,7 @@ import time
 
 import boto3
 
-from transfer import DB, DIGEST, send, read_command, unlock
+from transfer import DB, DIGEST, VERSION, send, read_command, unlock
 
 EC2 = boto3.client("ec2")
 SSM = boto3.client("ssm")
@@ -33,13 +33,16 @@ def launch(job, attempt=0):
     checksum = job["checksum"]
     if not DIGEST.fullmatch(checksum):
         raise ValueError("Invalid dataset checksum")
+    version_id = job["version_id"]
+    if not VERSION.fullmatch(version_id):
+        raise ValueError("Invalid dataset version")
     cid = send(TRAINER, [
         "set -e",
         "umask 077",
         "command -v aws >/dev/null || (apt-get update && apt-get install -y awscli)",
         "mkdir -p /opt/fyp-autotraining",
         f"aws s3 cp s3://{BUCKET}/scripts/run_training.sh /opt/fyp-autotraining/run_training.sh >/dev/null",
-        f"bash /opt/fyp-autotraining/run_training.sh {BUCKET} {REGION} {checksum}",
+        f"bash /opt/fyp-autotraining/run_training.sh {BUCKET} {REGION} {checksum} {version_id}",
     ], 43200)
     return {"ready": True, "command_id": cid}
 
