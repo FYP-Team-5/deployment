@@ -1,0 +1,41 @@
+name: Autotraining static checks
+
+on:
+  push:
+    branches: [feat/autotraining]
+    paths:
+      - 'autotraining/**'
+      - 'autotraining-*.tf'
+      - '.github/workflows/autotraining.yml'
+  pull_request:
+    paths:
+      - 'autotraining/**'
+      - 'autotraining-*.tf'
+      - '.github/workflows/autotraining.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install lightweight test dependencies
+        run: python -m pip install 'boto3>=1.35,<2' 'nbformat>=5,<6'
+      - name: Check Python syntax
+        run: python -m compileall -q autotraining
+      - name: Check shell scripts
+        run: bash -n autotraining/export_backend.sh autotraining/run_training.sh
+      - name: Unit tests
+        run: python -m unittest discover -s autotraining/tests -v
+      - uses: hashicorp/setup-terraform@v3
+      - name: Check Terraform formatting
+        run: terraform fmt -check autotraining-data.tf autotraining-gpu.tf autotraining-control.tf autotraining-schedule.tf
+      - name: Terraform validation
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate -no-color
