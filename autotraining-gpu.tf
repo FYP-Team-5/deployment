@@ -58,7 +58,10 @@ resource "aws_iam_role_policy" "autotraining" {
           "logs:CreateLogStream", "logs:DescribeLogStreams",
           "logs:PutLogEvents"
         ]
-        Resource = ["${aws_cloudwatch_log_group.autotraining.arn}:*"]
+        Resource = [
+          trimsuffix(aws_cloudwatch_log_group.autotraining.arn, ":*"),
+          "${trimsuffix(aws_cloudwatch_log_group.autotraining.arn, ":*")}:*"
+        ]
       }
     ]
   })
