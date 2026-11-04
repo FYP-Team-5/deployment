@@ -17,12 +17,19 @@ VERSION = re.compile(r"^[a-f0-9-]{36}$")
 
 
 def send(instance, lines, seconds):
+    options = {}
+    if instance == os.environ["TRAINING_INSTANCE_ID"]:
+        options["CloudWatchOutputConfig"] = {
+            "CloudWatchOutputEnabled": True,
+            "CloudWatchLogGroupName": os.environ["TRAIN_LOG_GROUP"],
+        }
     return SSM.send_command(
         InstanceIds=[instance],
         DocumentName="AWS-RunShellScript",
         Parameters={"commands": lines, "executionTimeout": [str(seconds)]},
         TimeoutSeconds=120,
         Comment="FYP nightly QLoRA",
+        **options,
     )["Command"]["CommandId"]
 
 
