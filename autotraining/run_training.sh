@@ -12,6 +12,12 @@ export PIP_DISABLE_PIP_VERSION_CHECK=1
 export HF_HOME="$WORK/hf-cache"
 export TOKENIZERS_PARALLELISM=false
 mkdir -p "$WORK"
+# Emergency cost guard if a Step Functions execution is force-terminated.
+# EC2 is configured to stop rather than terminate on guest shutdown.
+if command -v systemd-run >/dev/null; then
+    systemd-run --unit "fyp-trainer-watchdog-${CHECKSUM:0:8}" \
+        --on-active=15h /sbin/shutdown -h now || true
+fi
 cd "$WORK"
 command -v nvidia-smi >/dev/null
 nvidia-smi
