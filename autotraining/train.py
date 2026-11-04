@@ -138,8 +138,11 @@ def run(args):
         "seed": 42,
         "lora_rank": 48,
         "lora_alpha": 96,
+        "model_repo_commit": "8a2b94ec95754d875dc546461ef15dc2a279ce5a",
+        "base_model_revision": getattr(scope["model"].config, "_commit_hash", None),
         "adapter_uri": f"s3://{args.bucket}/{prefix}/adapter/",
         "metrics": clean(metrics),
+        "baseline_metrics": clean(scope.get("baseline_metrics", {})),
     }
     s3.put_object(
         Bucket=args.bucket, Key=f"{prefix}/result.json",
