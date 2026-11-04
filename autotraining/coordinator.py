@@ -14,7 +14,7 @@ def handler(event, context):
     if action == "start":
         return execution.start()
     if action == "launch":
-        return execution.launch(event["job"])
+        return execution.launch(event["job"], event.get("attempt", 0))
     if action == "poll":
         return execution.poll(event["command_id"])
     if action == "complete":
