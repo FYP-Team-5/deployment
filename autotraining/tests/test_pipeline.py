@@ -12,6 +12,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 os.environ.update({
     "AWS_DEFAULT_REGION": "us-east-1",
+    "AWS_REGION": "us-east-1",
     "AWS_EC2_METADATA_DISABLED": "true",
     "AWS_ACCESS_KEY_ID": "testing",
     "AWS_SECRET_ACCESS_KEY": "testing",
