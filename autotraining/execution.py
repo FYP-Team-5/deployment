@@ -24,12 +24,12 @@ def start():
     return {"instance_id": TRAINER}
 
 
-def launch(job):
+def launch(job, attempt=0):
     online = SSM.describe_instance_information(
         Filters=[{"Key": "InstanceIds", "Values": [TRAINER]}]
     )["InstanceInformationList"]
     if not any(info.get("PingStatus") == "Online" for info in online):
-        return {"ready": False}
+        return {"ready": False, "attempt": attempt + 1}
     checksum = job["checksum"]
     if not DIGEST.fullmatch(checksum):
         raise ValueError("Invalid dataset checksum")
