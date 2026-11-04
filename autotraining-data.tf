@@ -76,7 +76,7 @@ resource "aws_iam_role_policy" "autotraining_backend_export" {
       {
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
-        Resource = ["${aws_s3_bucket.autotraining.arn}/scripts/export_backend.sh"]
+        Resource = ["${aws_s3_bucket.autotraining.arn}/scripts/export_backend.sh", "${aws_s3_bucket.autotraining.arn}/datasets/*"]
       },
       {
         Effect   = "Allow"
