@@ -1,12 +1,12 @@
 # Training dependencies: the reference notebook's requirements, installed outside notebook.
 # Validate these versions against the selected GPU AMI before enabling the schedule.
-torch>=2.6,<3
-transformers>=5.0,<6
+torch==2.6.0
+transformers==5.22.1
 accelerate>=1.5,<2
 peft>=0.17,<1
 datasets>=3,<5
 bitsandbytes>=0.46,<1
-trl>=0.25,<1
+trl==0.29.1
 sentencepiece>=0.2,<1
 pandas>=2,<3
 scikit-learn>=1.5,<2
