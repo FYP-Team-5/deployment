@@ -46,6 +46,7 @@ def snapshot(context):
     command_id = send(BACKEND, [
         "set -e",
         "umask 077",
+        "command -v aws >/dev/null || (apt-get update && apt-get install -y awscli)",
         f"aws s3 cp s3://{BUCKET}/scripts/export_backend.sh /tmp/fyp-export.sh >/dev/null",
         f"bash /tmp/fyp-export.sh {BUCKET} {REGION}",
     ], 360)
