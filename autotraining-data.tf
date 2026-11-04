@@ -90,3 +90,8 @@ resource "aws_iam_role_policy" "autotraining_backend_export" {
 output "autotraining_s3_bucket" {
   value = aws_s3_bucket.autotraining.bucket
 }
+
+output "autotraining_state_table" {
+  description = "DynamoDB lock and last trained dataset state."
+  value       = aws_dynamodb_table.autotraining.name
+}
