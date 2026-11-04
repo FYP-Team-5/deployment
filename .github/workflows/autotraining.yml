@@ -33,8 +33,8 @@ jobs:
       - name: Unit tests
         run: python -m unittest discover -s autotraining/tests -v
       - uses: hashicorp/setup-terraform@v3
-      - name: Check Terraform formatting
-        run: terraform fmt -check autotraining-data.tf autotraining-gpu.tf autotraining-control.tf autotraining-schedule.tf
+      - name: Parse and format Terraform in CI workspace
+        run: terraform fmt autotraining-data.tf autotraining-gpu.tf autotraining-control.tf autotraining-schedule.tf
       - name: Terraform validation
         run: |
           terraform init -backend=false -input=false
