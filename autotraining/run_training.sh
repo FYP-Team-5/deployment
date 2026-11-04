@@ -5,6 +5,8 @@ umask 077
 BUCKET="$1"
 REGION="$2"
 CHECKSUM="$3"
+VERSION_ID="$4"
+[[ "$VERSION_ID" =~ ^[a-f0-9-]{36}$ ]] || exit 2
 [[ "$CHECKSUM" =~ ^[a-f0-9]{64}$ ]] || exit 2
 WORK="/opt/fyp-autotraining"
 MODEL_COMMIT="8a2b94ec95754d875dc546461ef15dc2a279ce5a"
@@ -49,5 +51,6 @@ fi
     --bucket "$BUCKET" \
     --checksum "$CHECKSUM" \
     --dataset "$WORK/dataset.csv" \
+    --version-id "$VERSION_ID" \
     --notebook "$WORK/model/Rubrics/Qlora Comparison/qlora (48r,96a).ipynb" \
     --output "$WORK/output-$CHECKSUM"
