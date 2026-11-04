@@ -132,6 +132,7 @@ def run(args):
     manifest = {
         "status": "completed",
         "dataset_checksum": args.checksum,
+        "dataset_version": args.version_id,
         "dataset_rows": len(scope["records"]),
         "dataset_stats": dataset_stats,
         "base_model": "Qwen/Qwen3.5-9B",
@@ -156,6 +157,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--checksum", required=True)
+    parser.add_argument("--version-id", required=True)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--notebook", required=True)
     parser.add_argument("--output", required=True)
