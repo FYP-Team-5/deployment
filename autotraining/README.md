@@ -14,7 +14,7 @@ This feature is implemented in the `feat/autotraining` branch of `FYP-Team-5/dep
 - Separate EC2 GPU instance: default `g6e.xlarge`, encrypted 200 GB root EBS, SSM-only management, no inbound security group rules. Terraform manages its initial state as stopped.
 - CloudWatch: Lambda execution logs and streaming training SSM output.
 
-The default training reference is the committed notebook `Rubrics/Qlora Comparison/qlora (48r,96a).ipynb` from `FYP-Team-5/model`, pinned to commit `8a2b94ec95754d875dc546461ef15dc2a279ce5a`.
+The PyTorch, Transformers and TRL package versions are pinned in `requirements.txt`; compatibility still requires a live GPU test. The default training reference is the committed notebook `Rubrics/Qlora Comparison/qlora (48r,96a).ipynb` from `FYP-Team-5/model`, pinned to commit `8a2b94ec95754d875dc546461ef15dc2a279ce5a`.
 
 ## Training contract
 
@@ -90,6 +90,6 @@ Manual acceptance criteria: successful immutable dataset export; no EC2 start on
 
 - Actual AWS/Terraform/GPU execution **must be verified in your AWS account**; offline unit tests alone cannot prove this deployment works in a real region with the selected GPU AMI.
 - There is no automatic promotion to the production grading model. The notebook outputs a binary-array grading adapter, while the current backend expects `score`, `feedback`, and `criteria_met` JSON objects. Promotion must address this mismatch and pass a separate fixed benchmark.
-- A global Step Functions timeout or a manually terminated execution can bypass normal cleanup; inspect the GPU state and stop it manually if needed. DynamoDB's 36-hour lock expiry allows recovery, but do not rerun while an orphaned training process is active.
+- A global Step Functions timeout or a manually terminated execution can bypass normal cleanup. The training shell schedules a best-effort 15-hour systemd shutdown watchdog; still inspect the GPU state and stop it manually if needed. DynamoDB's 36-hour lock expiry allows recovery, but do not rerun while an orphaned training process is active.
 - A stopped GPU EC2 instance still incurs EBS charges; S3, DynamoDB, CloudWatch, networking, and Step Functions can also incur charges.
 - The candidate S3 bucket is versioned. Back up valuable artifacts before cleanup; `terraform destroy` cannot delete a nonempty versioned bucket until its object versions are removed.
