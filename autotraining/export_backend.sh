@@ -48,5 +48,7 @@ PY
     echo 'Checksum mismatch' >&2
     exit 1
 }
-aws s3 cp --region "$region" "$temp" "s3://$bucket/datasets/$checksum/dataset.csv" >/dev/null
+if ! aws s3api head-object --region "$region" --bucket "$bucket" --key "datasets/$checksum/dataset.csv" >/dev/null 2>&1; then
+    aws s3 cp --region "$region" "$temp" "s3://$bucket/datasets/$checksum/dataset.csv" >/dev/null
+fi
 printf '{"version_id":"%s","checksum":"%s","row_count":%s}\n' "$version" "$checksum" "$rows"
