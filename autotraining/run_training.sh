@@ -6,26 +6,34 @@ BUCKET="$1"
 REGION="$2"
 CHECKSUM="$3"
 VERSION_ID="$4"
+RUN_ID="$5"
+[[ "$RUN_ID" =~ ^[a-f0-9]{32}$ ]] || exit 2
 [[ "$VERSION_ID" =~ ^[a-f0-9-]{36}$ ]] || exit 2
 [[ "$CHECKSUM" =~ ^[a-f0-9]{64}$ ]] || exit 2
 WORK="/opt/fyp-autotraining"
 MODEL_COMMIT="8a2b94ec95754d875dc546461ef15dc2a279ce5a"
+export AWS_DEFAULT_REGION="$REGION"
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 export HF_HOME="$WORK/hf-cache"
 export TOKENIZERS_PARALLELISM=false
 mkdir -p "$WORK"
+# Defend against duplicate SSM delivery or a redriven Launch state.
+exec 9>"$WORK/training.lock"
+flock -n 9 || { echo 'A training process already owns this GPU' >&2; exit 3; }
+[[ ! -f "$WORK/completed-$RUN_ID" ]] || exit 0
+trap 'rm -rf -- "$WORK/output-$RUN_ID"' EXIT
 # Emergency cost guard if a Step Functions execution is force-terminated.
 # EC2 is configured to stop rather than terminate on guest shutdown.
 if command -v systemd-run >/dev/null; then
-    systemd-run --unit "fyp-trainer-watchdog-${CHECKSUM:0:8}" \
+    systemd-run --unit "fyp-trainer-watchdog-$RUN_ID" \
         --on-active=15h /sbin/shutdown -h now || true
 fi
 cd "$WORK"
 command -v nvidia-smi >/dev/null
 nvidia-smi
-if ! command -v aws >/dev/null || ! command -v gcc >/dev/null || ! command -v git >/dev/null; then
+if ! command -v aws >/dev/null || ! command -v gcc >/dev/null || ! command -v git >/dev/null || ! command -v curl >/dev/null; then
     apt-get update
-    apt-get install -y awscli build-essential git python3-venv
+    apt-get install -y awscli build-essential git curl ca-certificates
 fi
 command -v python3 >/dev/null
 
@@ -39,18 +47,25 @@ fi
 git -C model fetch --depth 1 origin "$MODEL_COMMIT"
 git -C model checkout --force FETCH_HEAD
 
-if [[ ! -x .venv/bin/python ]]; then
-    if ! python3 -m venv .venv; then
-        apt-get update
-        apt-get install -y python3-venv
-        python3 -m venv .venv
-    fi
+# Ubuntu 22.04 defaults to Python 3.10; Transformers 5 requires >=3.11.
+# Use a dedicated Python 3.12 environment without altering the serving host.
+if [[ ! -x "$WORK/bin/uv" ]]; then
+    curl -LsSf --retry 3 https://astral.sh/uv/0.9.10/install.sh -o "$WORK/install-uv.sh"
+    UV_INSTALL_DIR="$WORK/bin" UV_NO_MODIFY_PATH=1 sh "$WORK/install-uv.sh"
+fi
+if [[ ! -x .venv/bin/python ]] || ! .venv/bin/python -c 'import sys; assert sys.version_info[:2] == (3, 12)'; then
+    "$WORK/bin/uv" venv --clear --seed --python 3.12 .venv
 fi
 .venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip check
 .venv/bin/python train.py \
     --bucket "$BUCKET" \
     --checksum "$CHECKSUM" \
+    --run-id "$RUN_ID" \
     --dataset "$WORK/dataset.csv" \
     --version-id "$VERSION_ID" \
     --notebook "$WORK/model/Rubrics/Qlora Comparison/qlora (48r,96a).ipynb" \
-    --output "$WORK/output-$CHECKSUM"
+    --output "$WORK/output-$RUN_ID"
+
+# Candidate is durable in S3; redriving this same run does not train twice.
+touch "$WORK/completed-$RUN_ID"

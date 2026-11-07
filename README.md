@@ -116,3 +116,9 @@ After a successful destroy, Terraform removes its two CloudWatch log groups (inc
 **Caution:** This permanently deletes application/database data stored on EC2. Back up any required data before destroying the stack. The command only destroys resources tracked by this Terraform state; manually created AWS resources, external snapshots/backups, and resources outside this stack are unaffected. Check for any orphaned resources if a destroy fails partway through. The local Terraform state and repository files are not deleted by Terraform.
 
 `user_data_replace_on_change = true` remains enabled: edits to the rendered startup script can trigger EC2 replacement on `terraform apply`, deleting the EC2-local data, although the EIP remains allocated until the entire stack is destroyed.
+
+## Nightly Qwen3.5-9B retraining
+
+[The nightly training workflow](autotraining/README.md) uses EventBridge Scheduler at **00:10 SGT**, Standard Step Functions, a Lambda coordinator and a separate stopped GPU EC2 instance. It checks the backend's latest immutable ready SeaweedFS CSV, skips previously trained checksums, then downloads, validates, trains and evaluates using the project's best tested QLoRA rank **48** / alpha **96** configuration. Candidate adapters, metrics, dataset identity and effective configuration are saved in private S3. Success/failure history is kept in DynamoDB; cleanup and a separate watchdog stop the trainer. Production model promotion is a separate step.
+
+The schedule is **disabled by default**. Follow the linked guide to deploy, complete a manual acceptance run, then persist `autotraining_schedule_enabled = true` in a local `.auto.tfvars` file and apply the reviewed plan. No changes to the serving instance's user-data are required. The training resources add AWS costs, including EBS while the trainer is stopped.

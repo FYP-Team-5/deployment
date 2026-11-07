@@ -1,30 +1,32 @@
-"""Lambda dispatch for the nightly Step Functions state machine."""
-import logging
+"""Lambda dispatch for the nightly Step Functions state machine and cost guard."""
 
 import execution
 import transfer
 
-log = logging.getLogger(__name__)
-
 
 def handler(event, context):
+    # Terminal workflow events also cover manual abort and global timeouts.
+    if event.get("source") == "aws.states":
+        detail = event["detail"]
+        if detail["status"] in ("FAILED", "TIMED_OUT", "ABORTED"):
+            return execution.cleanup(
+                detail["executionArn"], {"Error": detail["status"]}
+            )
+        return {"ignored": True}
     action = event["action"]
+    if action == "watchdog":
+        return execution.watchdog()
     if action == "prepare":
-        return transfer.prepare(context)
+        return transfer.prepare(context, event["execution_id"])
     if action == "start":
-        return execution.start()
+        return execution.start(event["job"])
     if action == "launch":
         return execution.launch(event["job"], event.get("attempt", 0))
     if action == "poll":
+        execution.require_owner(event["job"])
         return execution.poll(event["command_id"])
     if action == "complete":
         return execution.finish(event["job"])
-    if action == "stop":
-        result = execution.stop()
-        transfer.unlock(event["job"]["checksum"])
-        return result
-    if action == "fail":
-        job = event.get("job") or {}
-        log.error("Training workflow failed (version=%s)", job.get("version_id"))
-        return execution.failure(job)
+    if action in ("stop", "fail"):
+        return execution.cleanup(event["execution_id"], event.get("error"))
     raise ValueError("Unknown action")

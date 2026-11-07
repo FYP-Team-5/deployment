@@ -21,8 +21,8 @@ resource "aws_iam_role" "autotraining" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
-      Action = "sts:AssumeRole"
+      Effect    = "Allow"
+      Action    = "sts:AssumeRole"
       Principal = { Service = "ec2.amazonaws.com" }
     }]
   })
@@ -48,8 +48,8 @@ resource "aws_iam_role_policy" "autotraining" {
         ]
       },
       {
-        Effect = "Allow"
-        Action = ["s3:PutObject"]
+        Effect   = "Allow"
+        Action   = ["s3:PutObject"]
         Resource = ["${aws_s3_bucket.autotraining.arn}/candidates/*"]
       },
       {
@@ -72,12 +72,12 @@ resource "aws_iam_instance_profile" "autotraining" {
 }
 
 resource "aws_instance" "autotraining" {
-  ami                         = data.aws_ssm_parameter.gpu_ami.value
-  instance_type               = var.autotraining_instance_type
-  subnet_id                   = aws_subnet.llm.id
-  vpc_security_group_ids      = [aws_security_group.autotraining.id]
-  iam_instance_profile        = aws_iam_instance_profile.autotraining.name
-  associate_public_ip_address = true
+  ami                                  = data.aws_ssm_parameter.gpu_ami.value
+  instance_type                        = var.autotraining_instance_type
+  subnet_id                            = aws_subnet.llm.id
+  vpc_security_group_ids               = [aws_security_group.autotraining.id]
+  iam_instance_profile                 = aws_iam_instance_profile.autotraining.name
+  associate_public_ip_address          = true
   instance_initiated_shutdown_behavior = "stop"
   metadata_options {
     http_tokens = "required"

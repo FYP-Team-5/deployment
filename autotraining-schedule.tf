@@ -3,8 +3,8 @@ resource "aws_iam_role" "autotraining_stepfunctions" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
-      Action = "sts:AssumeRole"
+      Effect    = "Allow"
+      Action    = "sts:AssumeRole"
       Principal = { Service = "states.amazonaws.com" }
     }]
   })
@@ -15,8 +15,8 @@ resource "aws_iam_role_policy" "autotraining_stepfunctions" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
-      Action = ["lambda:InvokeFunction"]
+      Effect   = "Allow"
+      Action   = ["lambda:InvokeFunction"]
       Resource = aws_lambda_function.autotraining.arn
     }]
   })
@@ -36,8 +36,8 @@ resource "aws_iam_role" "autotraining_scheduler" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
-      Action = "sts:AssumeRole"
+      Effect    = "Allow"
+      Action    = "sts:AssumeRole"
       Principal = { Service = "scheduler.amazonaws.com" }
     }]
   })
@@ -48,8 +48,8 @@ resource "aws_iam_role_policy" "autotraining_scheduler" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
-      Action = ["states:StartExecution"]
+      Effect   = "Allow"
+      Action   = ["states:StartExecution"]
       Resource = aws_sfn_state_machine.autotraining.arn
     }]
   })
@@ -84,4 +84,51 @@ output "autotraining_state_machine_arn" {
 }
 output "autotraining_schedule_name" {
   value = aws_scheduler_schedule.autotraining.name
+}
+
+# Task Catch handlers cannot handle a whole execution timing out or being aborted.
+resource "aws_cloudwatch_event_rule" "autotraining_terminal" {
+  name = "${var.name}-training-cleanup"
+  event_pattern = jsonencode({
+    source        = ["aws.states"]
+    "detail-type" = ["Step Functions Execution Status Change"]
+    detail = {
+      stateMachineArn = [aws_sfn_state_machine.autotraining.arn]
+      status          = ["FAILED", "TIMED_OUT", "ABORTED"]
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "autotraining_terminal" {
+  rule = aws_cloudwatch_event_rule.autotraining_terminal.name
+  arn  = aws_lambda_function.autotraining.arn
+}
+
+resource "aws_lambda_permission" "autotraining_terminal" {
+  statement_id  = "ExecutionTerminalCleanup"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.autotraining.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.autotraining_terminal.arn
+}
+
+# Independent of nightly scheduling: also reconcile missed terminal events and
+# stop executions exceeding 14 hours, including failures before SSM is ready.
+resource "aws_cloudwatch_event_rule" "autotraining_watchdog" {
+  name                = "${var.name}-training-watchdog"
+  schedule_expression = "rate(15 minutes)"
+}
+
+resource "aws_cloudwatch_event_target" "autotraining_watchdog" {
+  rule  = aws_cloudwatch_event_rule.autotraining_watchdog.name
+  arn   = aws_lambda_function.autotraining.arn
+  input = jsonencode({ action = "watchdog" })
+}
+
+resource "aws_lambda_permission" "autotraining_watchdog" {
+  statement_id  = "TrainingWatchdog"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.autotraining.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.autotraining_watchdog.arn
 }

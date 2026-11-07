@@ -6,11 +6,15 @@ on:
     paths:
       - 'autotraining/**'
       - 'autotraining-*.tf'
+      - 'versions.tf'
+      - '.terraform.lock.hcl'
       - '.github/workflows/autotraining.yml'
   pull_request:
     paths:
       - 'autotraining/**'
       - 'autotraining-*.tf'
+      - 'versions.tf'
+      - '.terraform.lock.hcl'
       - '.github/workflows/autotraining.yml'
 
 permissions:
@@ -25,16 +29,20 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install lightweight test dependencies
-        run: python -m pip install 'boto3>=1.35,<2' 'nbformat>=5,<6'
+        run: python -m pip install 'boto3>=1.35,<2' 'ruff==0.16.4'
       - name: Check Python syntax
         run: python -m compileall -q autotraining
       - name: Check shell scripts
-        run: bash -n autotraining/export_backend.sh autotraining/run_training.sh
+        run: |
+          bash -n autotraining/export_backend.sh
+          bash -n autotraining/run_training.sh
+      - name: Python lint
+        run: ruff check autotraining
       - name: Unit tests
         run: python -m unittest discover -s autotraining/tests -v
       - uses: hashicorp/setup-terraform@v3
-      - name: Parse and format Terraform in CI workspace
-        run: terraform fmt autotraining-data.tf autotraining-gpu.tf autotraining-control.tf autotraining-schedule.tf
+      - name: Check Terraform formatting
+        run: terraform fmt -check autotraining-data.tf autotraining-gpu.tf autotraining-control.tf autotraining-schedule.tf versions.tf
       - name: Terraform validation
         run: |
           terraform init -backend=false -input=false

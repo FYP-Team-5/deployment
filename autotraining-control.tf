@@ -1,21 +1,14 @@
 # Package the Lambda coordinator and its local helper modules.
-terraform {
-  required_providers {
-    archive = {
-      source  = "hashicorp/archive"
-      version = "~> 2.0"
-    }
-  }
-}
 data "archive_file" "autotraining_lambda" {
   type        = "zip"
-  source_dir  = "${path.module}/autotraining"
   output_path = "${path.module}/autotraining/lambda.zip"
-  excludes = [
-    "README.md", ".gitignore", "train.py", "run_training.sh",
-    "export_backend.sh", "requirements.txt", "workflow.asl.json.tftpl",
-    "lambda.zip"
-  ]
+  dynamic "source" {
+    for_each = toset(["coordinator.py", "transfer.py", "execution.py"])
+    content {
+      content  = file("${path.module}/autotraining/${source.value}")
+      filename = source.value
+    }
+  }
 }
 
 resource "aws_iam_role" "autotraining_lambda" {
@@ -23,8 +16,8 @@ resource "aws_iam_role" "autotraining_lambda" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
-      Action = "sts:AssumeRole"
+      Effect    = "Allow"
+      Action    = "sts:AssumeRole"
       Principal = { Service = "lambda.amazonaws.com" }
     }]
   })
@@ -40,28 +33,33 @@ resource "aws_iam_role_policy" "autotraining_lambda" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
         Resource = aws_dynamodb_table.autotraining.arn
       },
       {
-        Effect = "Allow"
-        Action = ["s3:GetObject"]
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
         Resource = ["${aws_s3_bucket.autotraining.arn}/candidates/*"]
       },
       {
-        Effect = "Allow"
-        Action = ["ec2:StartInstances", "ec2:StopInstances"]
+        Effect   = "Allow"
+        Action   = ["ec2:StartInstances", "ec2:StopInstances"]
         Resource = aws_instance.autotraining.arn
       },
       {
-        Effect = "Allow"
-        Action = ["ec2:DescribeInstances"]
+        Effect   = "Allow"
+        Action   = ["ec2:DescribeInstances"]
         Resource = "*"
       },
       {
-        Effect = "Allow"
-        Action = ["ssm:DescribeInstanceInformation", "ssm:GetCommandInvocation"]
+        Effect   = "Allow"
+        Action   = ["states:DescribeExecution"]
+        Resource = "arn:aws:states:${var.aws_region}:${data.aws_caller_identity.autotraining.account_id}:execution:${var.name}-nightly-training:*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ssm:DescribeInstanceInformation", "ssm:GetCommandInvocation"]
         Resource = "*"
       },
       {

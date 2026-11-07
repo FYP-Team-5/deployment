@@ -11,13 +11,21 @@ trap 'rm -f "$temp"' EXIT
 meta="$(docker compose --project-directory /opt/fyp/backend exec -T api python -c '
 import json
 from app.config import Settings
-from app.db.grading_repository import PostgresGradingRepository
+from app.db.grading_repository import PostgresGradingRepository, GradingRecordNotFoundError
 from app.db.dataset_repository import DatasetRepository
 s=Settings()
-row,m=DatasetRepository(PostgresGradingRepository(s.database_url)).get_version()
+try:
+    row,m=DatasetRepository(PostgresGradingRepository(s.database_url)).get_version()
+except GradingRecordNotFoundError:
+    print(json.dumps({"reason":"no_ready_dataset"}))
+    raise SystemExit(0)
 if row["status"]!="ready": raise ValueError("No ready version")
 print(json.dumps({"version_id":m["id"],"checksum":m["checksum"],"row_count":m["row_count"]}))
 ')"
+if [[ "$(printf '%s' "$meta" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("reason", ""))')" == "no_ready_dataset" ]]; then
+    printf '{"reason":"no_ready_dataset"}\n'
+    exit 0
+fi
 read -r version checksum rows < <(printf '%s' "$meta" | python3 -c '
 import json,sys
 m=json.load(sys.stdin)
