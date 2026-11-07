@@ -16,8 +16,14 @@ def handler(event, context):
     action = event["action"]
     if action == "watchdog":
         return execution.watchdog()
+    if action == "snapshot":
+        return transfer.start_snapshot()
     if action == "prepare":
-        return transfer.prepare(context, event["execution_id"])
+        return transfer.prepare(event["command_id"], event["execution_id"])
+    if action == "publish":
+        return execution.publish(event["job"])
+    if action == "publication_status":
+        return execution.publication_status(event["job"], event["command_id"])
     if action == "start":
         return execution.start(event["job"])
     if action == "launch":

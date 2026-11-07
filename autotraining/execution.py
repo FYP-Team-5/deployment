@@ -4,26 +4,25 @@ import json
 import math
 import os
 import re
+import shlex
 import time
 
 import boto3
-from transfer import (
-    DB,
-    DIGEST,
-    VERSION,
+from state import (
+    AWS_CONFIG,
     claim_cleanup,
     get_item,
     owns,
-    read_command,
     record,
     release_cleanup,
-    send,
     unlock,
+    write,
 )
+from transfer import DIGEST, VERSION, read_command, send
 
-EC2 = boto3.client("ec2")
-SSM = boto3.client("ssm")
-S3 = boto3.client("s3")
+EC2 = boto3.client("ec2", config=AWS_CONFIG)
+SSM = boto3.client("ssm", config=AWS_CONFIG)
+S3 = boto3.client("s3", config=AWS_CONFIG)
 TRAINER = os.environ["TRAINING_INSTANCE_ID"]
 BUCKET = os.environ["ARTIFACT_BUCKET"]
 REGION = os.environ["AWS_REGION"]
@@ -85,12 +84,18 @@ def poll(command_id):
     return {"done": False}
 
 
+def read_manifest(key):
+    response = S3.get_object(Bucket=BUCKET, Key=key)
+    with response["Body"] as body:
+        return json.loads(body.read())
+
+
 def finish(job):
     require_owner(job)
     checksum = job["checksum"]
     prefix = f"candidates/{checksum}/{job['run_id']}"
     result_key = f"{prefix}/result.json"
-    result = json.loads(S3.get_object(Bucket=BUCKET, Key=result_key)["Body"].read())
+    result = read_manifest(result_key)
     if (
         result.get("dataset_checksum") != checksum
         or result.get("status") != "completed"
@@ -113,7 +118,6 @@ def finish(job):
     for name in ("adapter_config.json", "adapter_model.safetensors"):
         S3.head_object(Bucket=BUCKET, Key=f"{prefix}/adapter/{name}")
     marker = {
-        "pk": "latest",
         "checksum": checksum,
         "version_id": job["version_id"],
         "adapter_uri": result["adapter_uri"],
@@ -121,8 +125,8 @@ def finish(job):
         "run_id": job["run_id"],
         "result_key": result_key,
     }
-    DB.put_item(Item={**marker, "pk": "success#" + checksum})
-    DB.put_item(Item=marker)
+    write("trained/" + checksum, marker)
+    write("latest", marker)
     record(
         job, "candidate_saved", result_key=result_key, adapter_uri=result["adapter_uri"]
     )
@@ -135,27 +139,26 @@ def stop():
     ][0]["State"]["Name"]
     if current in ("running", "pending"):
         EC2.stop_instances(InstanceIds=[TRAINER])
-    # Keep the lock until the guest and its SSM training process have stopped.
-    EC2.get_waiter("instance_stopped").wait(
-        InstanceIds=[TRAINER],
-        WaiterConfig={"Delay": 5, "MaxAttempts": 90},
-    )
-    return {"stopped": True}
+    # Step Functions performs the wait between calls, outside billed Lambda time.
+    return {"stopped": current == "stopped"}
 
 
 def cleanup(execution_id, error=None):
     job = get_item("lock")
     if job.get("execution_id") != execution_id:
-        return {"ignored": "execution_does_not_own_gpu"}
-    # Lease lasts longer than Lambda's maximum execution duration, so two
-    # cleanups cannot race a new owner through stop/wait/unlock.
+        return {"ignored": "execution_does_not_own_gpu", "stopped": True}
+    # Lease exceeds the 120-second Lambda timeout. Only one cleanup can stop
+    # the guest at a time, and the GPU lock survives until EC2 reports stopped.
     token = claim_cleanup(job)
     try:
         result = stop()
     except Exception:
         release_cleanup(job, token)
         raise
-    saved = get_item("run#" + job["run_id"])
+    if not result["stopped"]:
+        release_cleanup(job, token)
+        return result
+    saved = get_item("runs/" + job["run_id"])
     status = (
         "completed"
         if saved.get("status") in ("candidate_saved", "completed")
@@ -168,13 +171,59 @@ def cleanup(execution_id, error=None):
 
 def watchdog():
     job = get_item("lock")
-    if not job:
+    if not job.get("execution_id"):
         return {"idle": True}
     expired = time.time() - int(job["started_at"]) >= 14 * 3600
     if not expired:
-        status = boto3.client("stepfunctions").describe_execution(
+        status = boto3.client("stepfunctions", config=AWS_CONFIG).describe_execution(
             executionArn=job["execution_id"],
         )["status"]
         if status == "RUNNING":
             return {"running": True}
     return cleanup(job["execution_id"], {"Error": "AbandonedOrOverdueExecution"})
+
+
+def publish(job):
+    values = [
+        BUCKET,
+        REGION,
+        job["checksum"],
+        job["run_id"],
+        os.environ["HF_REPO"],
+        os.environ["HF_TOKEN_PARAMETER"],
+        os.environ["CALLBACK_TOKEN_PARAMETER"],
+        os.environ["CALLBACK_URL"],
+    ]
+    command_id = send(
+        os.environ["BACKEND_INSTANCE_ID"],
+        [
+            "set -eu",
+            "umask 077",
+            "mkdir -p /opt/fyp-training-publish",
+            f"aws s3 cp s3://{BUCKET}/scripts/publish.sh /opt/fyp-training-publish/publish.sh >/dev/null",
+            "bash /opt/fyp-training-publish/publish.sh "
+            + " ".join(map(shlex.quote, values)),
+        ],
+        1800,
+    )
+    return {"command_id": command_id}
+
+
+def publication_status(job, command_id):
+    result = read_command(os.environ["BACKEND_INSTANCE_ID"], command_id)
+    if result["Status"] in ("Failed", "TimedOut", "Cancelled", "DeliveryTimedOut"):
+        raise RuntimeError(
+            "HF publication/backend notification failed; retry without retraining"
+        )
+    if result["Status"] != "Success":
+        return {"done": False}
+    receipt = read_manifest(f"publications/{job['run_id']}/result.json")
+    if receipt.get("run_id") != job["run_id"] or receipt.get("notified") is not True:
+        raise ValueError("Backend notification not confirmed")
+    marker = {
+        **job,
+        "hf_revision": receipt["hf_revision"],
+        "hf_repo": receipt["hf_repo"],
+    }
+    write("success/" + job["checksum"], marker)
+    return {"done": True}

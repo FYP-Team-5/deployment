@@ -36,6 +36,8 @@ jobs:
         run: |
           bash -n autotraining/export_backend.sh
           bash -n autotraining/run_training.sh
+          bash -n autotraining/publish.sh
+          bash -n Script/serve_qwen35_vllm.sh
       - name: Python lint
         run: ruff check autotraining
       - name: Unit tests

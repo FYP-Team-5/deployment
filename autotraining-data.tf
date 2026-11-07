@@ -34,19 +34,6 @@ resource "aws_s3_bucket_versioning" "autotraining" {
   bucket = aws_s3_bucket.autotraining.id
   versioning_configuration { status = "Enabled" }
 }
-resource "aws_dynamodb_table" "autotraining" {
-  name         = "${var.name}-training-state"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "pk"
-  attribute {
-    name = "pk"
-    type = "S"
-  }
-  ttl {
-    attribute_name = "expires_at"
-    enabled        = true
-  }
-}
 
 locals {
   autotraining_scripts = {
@@ -54,6 +41,8 @@ locals {
     "run_training.sh"   = "autotraining/run_training.sh"
     "train.py"          = "autotraining/train.py"
     "requirements.txt"  = "autotraining/requirements.txt"
+    "publish.py"        = "autotraining/publish.py"
+    "publish.sh"        = "autotraining/publish.sh"
   }
 }
 resource "aws_s3_object" "autotraining_scripts" {
@@ -76,13 +65,29 @@ resource "aws_iam_role_policy" "autotraining_backend_export" {
       {
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
-        Resource = ["${aws_s3_bucket.autotraining.arn}/scripts/export_backend.sh", "${aws_s3_bucket.autotraining.arn}/datasets/*"]
+        Resource = ["${aws_s3_bucket.autotraining.arn}/scripts/export_backend.sh", "${aws_s3_bucket.autotraining.arn}/scripts/publish*", "${aws_s3_bucket.autotraining.arn}/datasets/*", "${aws_s3_bucket.autotraining.arn}/candidates/*", "${aws_s3_bucket.autotraining.arn}/publications/*"]
       },
       {
         Effect   = "Allow"
         Action   = ["s3:PutObject"]
-        Resource = ["${aws_s3_bucket.autotraining.arn}/datasets/*"]
+        Resource = ["${aws_s3_bucket.autotraining.arn}/datasets/*", "${aws_s3_bucket.autotraining.arn}/publications/*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.autotraining.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:PutObjectTagging"]
+        Resource = "${aws_s3_bucket.autotraining.arn}/candidates/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = [for parameter in [var.autotraining_hf_token_parameter, var.autotraining_callback_token_parameter] : "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.autotraining.account_id}:parameter${parameter}"]
       }
+
     ]
   })
 }
@@ -91,7 +96,51 @@ output "autotraining_s3_bucket" {
   value = aws_s3_bucket.autotraining.bucket
 }
 
-output "autotraining_state_table" {
-  description = "DynamoDB lock and last trained dataset state."
-  value       = aws_dynamodb_table.autotraining.name
+output "autotraining_control_prefix" {
+  value = "s3://${aws_s3_bucket.autotraining.bucket}/control/"
+}
+
+variable "autotraining_hf_repo" {
+  type    = string
+  default = "SmuFypTeam5/GradingQlora"
+}
+variable "autotraining_hf_token_parameter" {
+  description = "Existing SSM SecureString containing a repo-scoped HF write token; value is never stored in Terraform."
+  type        = string
+  default     = "/fyp/training/hf-token"
+}
+variable "autotraining_callback_token_parameter" {
+  description = "Existing SSM SecureString matching backend TRAINING_CALLBACK_TOKEN."
+  type        = string
+  default     = "/fyp/training/callback-token"
+}
+
+# HF keeps published commits. Bound duplicate staging storage while preserving
+# unpublished artifacts and all current control/receipt records.
+resource "aws_s3_bucket_lifecycle_configuration" "autotraining" {
+  bucket = aws_s3_bucket.autotraining.id
+  rule {
+    id     = "published-candidate-staging"
+    status = "Enabled"
+    filter {
+      and {
+        prefix = "candidates/"
+        tags   = { published = "true" }
+      }
+    }
+    expiration { days = 30 }
+    noncurrent_version_expiration { noncurrent_days = 30 }
+  }
+  rule {
+    id     = "old-control-versions"
+    status = "Enabled"
+    filter { prefix = "control/" }
+    noncurrent_version_expiration { noncurrent_days = 30 }
+  }
+  rule {
+    id     = "abandoned-multipart-uploads"
+    status = "Enabled"
+    filter {}
+    abort_incomplete_multipart_upload { days_after_initiation = 7 }
+  }
 }

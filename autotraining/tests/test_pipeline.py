@@ -8,7 +8,6 @@ import os
 import sys
 import tempfile
 import unittest
-from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -23,7 +22,6 @@ os.environ.update(
         "AWS_EC2_METADATA_DISABLED": "true",
         "AWS_ACCESS_KEY_ID": "testing",
         "AWS_SECRET_ACCESS_KEY": "testing",
-        "STATE_TABLE": "unit-tests",
         "ARTIFACT_BUCKET": "example-bucket",
         "BACKEND_INSTANCE_ID": "i-backend",
         "TRAINING_INSTANCE_ID": "i-trainer",
@@ -33,6 +31,8 @@ os.environ.update(
 sys.path.insert(0, str(ROOT))
 import coordinator
 import execution
+import publish
+import state
 import train
 import transfer
 
@@ -56,45 +56,32 @@ JOB = {
 }
 
 
-def conflict():
-    return ClientError(
-        {"Error": {"Code": "ConditionalCheckFailedException"}}, "PutItem"
-    )
+class MemoryState:
+    def __init__(self):
+        self.items = {}
 
+    def tag(self, value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
-class MemoryDB:
-    def __init__(self, items=None):
-        self.items = items or {}
+    def get_object(self, Bucket, Key):
+        key = Key.removeprefix("control/").removesuffix(".json")
+        if key not in self.items:
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        return {
+            "Body": io.BytesIO(json.dumps(self.items[key]).encode()),
+            "ETag": self.tag(self.items[key]),
+        }
 
-    def get_item(self, Key, **kwargs):
-        return {"Item": dict(self.items.get(Key["pk"], {}))}
-
-    def put_item(
-        self, Item, ConditionExpression=None, ExpressionAttributeValues=None, **kwargs
-    ):
-        current = self.items.get(Item["pk"], {})
-        values = ExpressionAttributeValues or {}
-        if ConditionExpression == "attribute_not_exists(pk)" and current:
-            raise conflict()
-        if ConditionExpression and "execution_id = :owner" in ConditionExpression:
-            if current.get("execution_id") != values[":owner"]:
-                raise conflict()
-            if (
-                "cleanup_until < :now" in ConditionExpression
-                and current.get("cleanup_until", 0) >= values[":now"]
-            ):
-                raise conflict()
-            if ":token" in values and current.get("cleanup_token") != values[":token"]:
-                raise conflict()
-        self.items[Item["pk"]] = dict(Item)
-
-    def delete_item(self, Key, ExpressionAttributeValues, **kwargs):
-        if (
-            self.items.get(Key["pk"], {}).get("execution_id")
-            != ExpressionAttributeValues[":owner"]
+    def put_object(self, Bucket, Key, Body, **kwargs):
+        key = Key.removeprefix("control/").removesuffix(".json")
+        current = self.items.get(key)
+        if kwargs.get("IfNoneMatch") == "*" and current is not None:
+            raise ClientError({"Error": {"Code": "PreconditionFailed"}}, "PutObject")
+        if kwargs.get("IfMatch") and (
+            current is None or self.tag(current) != kwargs["IfMatch"]
         ):
-            raise conflict()
-        self.items.pop(Key["pk"], None)
+            raise ClientError({"Error": {"Code": "PreconditionFailed"}}, "PutObject")
+        self.items[key] = json.loads(Body)
 
 
 class DatasetTests(unittest.TestCase):
@@ -276,11 +263,8 @@ class RunnerTests(unittest.TestCase):
 
 class CoordinatorTests(unittest.TestCase):
     def setUp(self):
-        self.db = MemoryDB()
-        self.patches = [
-            patch.object(transfer, "DB", self.db),
-            patch.object(execution, "DB", self.db),
-        ]
+        self.db = MemoryState()
+        self.patches = [patch.object(state, "S3", self.db)]
         for active in self.patches:
             active.start()
             self.addCleanup(active.stop)
@@ -290,12 +274,12 @@ class CoordinatorTests(unittest.TestCase):
             return transfer.prepare(object(), JOB["execution_id"])
 
     def test_unchanged_latest_skips_gpu(self):
-        self.db.items["latest"] = {"checksum": JOB["checksum"]}
+        self.db.items["success/" + JOB["checksum"]] = {"checksum": JOB["checksum"]}
         self.assertFalse(self.prepare()["train"])
-        self.assertNotIn("lock", self.db.items)
+        self.assertFalse(self.db.items.get("lock", {}).get("execution_id"))
 
     def test_previously_trained_checksum_skips_even_if_latest_changed(self):
-        self.db.items["success#" + JOB["checksum"]] = {"checksum": JOB["checksum"]}
+        self.db.items["success/" + JOB["checksum"]] = {"checksum": JOB["checksum"]}
         self.db.items["latest"] = {"checksum": "c" * 64}
         self.assertEqual(self.prepare()["reason"], "unchanged")
 
@@ -311,7 +295,7 @@ class CoordinatorTests(unittest.TestCase):
         self.assertTrue(job["train"])
         self.assertEqual(self.db.items["lock"]["execution_id"], JOB["execution_id"])
         self.assertNotIn("expires_at", self.db.items["lock"])
-        self.assertEqual(self.db.items["run#" + job["run_id"]]["status"], "running")
+        self.assertEqual(self.db.items["runs/" + job["run_id"]]["status"], "running")
 
     def test_overlap_is_skipped_and_cannot_release_another_owner(self):
         self.db.items["lock"] = dict(JOB, execution_id="other")
@@ -362,20 +346,21 @@ class CoordinatorTests(unittest.TestCase):
             execution.cleanup(JOB["execution_id"])
         self.assertIn("lock", self.db.items)
 
-    def test_stop_confirms_stopped_before_unlock(self):
+    def test_stop_waits_in_workflow_without_billing_lambda_for_a_waiter(self):
         self.db.items["lock"] = dict(JOB)
         with patch.object(execution, "EC2") as ec2:
             ec2.describe_instances.return_value = {
                 "Reservations": [{"Instances": [{"State": {"Name": "running"}}]}]
             }
-            ec2.get_waiter.return_value.wait.side_effect = lambda **_: self.assertIn(
-                "lock", self.db.items
-            )
-            execution.cleanup(JOB["execution_id"], {"Error": "TestFailure"})
+            self.assertFalse(execution.cleanup(JOB["execution_id"])["stopped"])
             ec2.stop_instances.assert_called_once()
-            ec2.get_waiter.return_value.wait.assert_called_once()
-        self.assertNotIn("lock", self.db.items)
-        self.assertEqual(self.db.items["run#" + JOB["run_id"]]["status"], "failed")
+            self.assertEqual(self.db.items["lock"]["execution_id"], JOB["execution_id"])
+            ec2.describe_instances.return_value = {
+                "Reservations": [{"Instances": [{"State": {"Name": "stopped"}}]}]
+            }
+            self.assertTrue(execution.cleanup(JOB["execution_id"])["stopped"])
+            ec2.get_waiter.assert_not_called()
+        self.assertFalse(self.db.items["lock"].get("execution_id"))
 
     def test_late_abort_event_cannot_stop_next_run(self):
         self.db.items["lock"] = dict(JOB, execution_id="next_execution")
@@ -396,31 +381,31 @@ class CoordinatorTests(unittest.TestCase):
         self.db.items["lock"] = dict(JOB)
 
         def second_cleanup():
-            with self.assertRaises(ClientError):
+            with self.assertRaises(state.StateConflict):
                 execution.cleanup(JOB["execution_id"])
             return {"stopped": True}
 
         with patch.object(execution, "stop", side_effect=second_cleanup) as stop:
             execution.cleanup(JOB["execution_id"])
         self.assertEqual(stop.call_count, 1)
-        self.assertNotIn("lock", self.db.items)
+        self.assertFalse(self.db.items.get("lock", {}).get("execution_id"))
 
     def test_expired_cleanup_lease_can_be_recovered(self):
         self.db.items["lock"] = dict(JOB, cleanup_token="expired", cleanup_until=1)
         with patch.object(execution, "stop", return_value={"stopped": True}):
             execution.cleanup(JOB["execution_id"])
-        self.assertNotIn("lock", self.db.items)
+        self.assertFalse(self.db.items.get("lock", {}).get("execution_id"))
 
     def test_watchdog_cleans_overdue_owner(self):
         self.db.items["lock"] = dict(JOB)
         with patch.object(execution, "stop", return_value={"stopped": True}):
             execution.watchdog()
-        self.assertNotIn("lock", self.db.items)
+        self.assertFalse(self.db.items.get("lock", {}).get("execution_id"))
 
     def test_watchdog_keeps_live_execution(self):
         import time
 
-        self.db.items["lock"] = dict(JOB, started_at=Decimal(int(time.time())))
+        self.db.items["lock"] = dict(JOB, started_at=int(time.time()))
         with (
             patch.object(execution.boto3, "client") as client,
             patch.object(execution, "stop") as stop,
@@ -457,10 +442,154 @@ class CoordinatorTests(unittest.TestCase):
             }
             execution.finish(JOB)
             self.assertEqual(s3.head_object.call_count, 2)
-        self.assertIn("success#" + JOB["checksum"], self.db.items)
+        self.assertIn("trained/" + JOB["checksum"], self.db.items)
         with patch.object(execution, "stop", return_value={"stopped": True}):
             execution.cleanup(JOB["execution_id"])
-        self.assertEqual(self.db.items["run#" + JOB["run_id"]]["status"], "completed")
+        self.assertEqual(self.db.items["runs/" + JOB["run_id"]]["status"], "completed")
+
+
+class S3StateTests(unittest.TestCase):
+    def setUp(self):
+        self.storage = MemoryState()
+        self.patch = patch.object(state, "S3", self.storage)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+
+    def test_compare_and_swap_rejects_stale_owner(self):
+        self.assertTrue(state.claim(JOB))
+        value, etag = state.read("lock")
+        state.claim_cleanup(JOB)
+        with self.assertRaises(state.StateConflict):
+            state.write("lock", value, etag=etag)
+
+    def test_idle_generation_changes_to_prevent_aba(self):
+        state.claim(JOB)
+        state.unlock(JOB)
+        first_idle, etag = state.read("lock")
+        state.claim(dict(JOB, execution_id="second"))
+        state.unlock(dict(JOB, execution_id="second"))
+        self.assertNotEqual(first_idle, state.get_item("lock"))
+        with self.assertRaises(state.StateConflict):
+            state.write("lock", JOB, etag=etag)
+
+    def test_absent_record_does_not_hide_permission_failures(self):
+        with (
+            patch.object(
+                state.S3,
+                "get_object",
+                side_effect=ClientError(
+                    {"Error": {"Code": "AccessDenied"}}, "GetObject"
+                ),
+            ),
+            self.assertRaises(ClientError),
+        ):
+            state.get_item("lock")
+
+
+class PublicationTests(unittest.TestCase):
+    def test_callback_replay_reuses_pinned_hf_upload(self):
+        receipt = {
+            "run_id": JOB["run_id"],
+            "hf_repo": "org/repo",
+            "hf_revision": "c" * 40,
+            "candidate": {"run_id": JOB["run_id"]},
+            "notified": False,
+        }
+        args = SimpleNamespace(
+            run_id=JOB["run_id"],
+            checksum=JOB["checksum"],
+            bucket="bucket",
+            hf_token_parameter="/hf",
+            callback_token_parameter="/callback",
+            callback_url="http://private/api",
+            repo="org/repo",
+        )
+        aws = MagicMock()
+        aws.get_parameter.return_value = {"Parameter": {"Value": "secret"}}
+        with (
+            patch.object(publish.boto3, "client", return_value=aws),
+            patch.object(publish, "get_json", return_value=receipt),
+            patch.object(publish, "notify") as notify,
+            patch.object(publish, "put_json") as save,
+        ):
+            publish.publish(args)
+        notify.assert_called_once_with(
+            args.callback_url, "secret", receipt["candidate"]
+        )
+        self.assertTrue(save.call_args.args[-1]["notified"])
+
+    def test_fresh_publication_writes_candidate_branch_then_saves_receipt_before_callback(
+        self,
+    ):
+        args = SimpleNamespace(
+            run_id=JOB["run_id"],
+            checksum=JOB["checksum"],
+            bucket="bucket",
+            hf_token_parameter="/hf",
+            callback_token_parameter="/callback",
+            callback_url="http://private/api",
+            repo="org/repo",
+        )
+        manifest = {
+            "run_id": JOB["run_id"],
+            "dataset_checksum": JOB["checksum"],
+            "dataset_version": JOB["version_id"],
+            "completed_at": "2026-11-07T00:00:00+00:00",
+            "base_model": "Qwen/Qwen3.5-9B",
+            "metrics": {"valid_examples": 2, "final_score_mae": 0.1},
+            "baseline_metrics": {},
+            "configuration": {},
+            "dataset_stats": {},
+        }
+        aws, hf = MagicMock(), MagicMock()
+        aws.get_parameter.return_value = {"Parameter": {"Value": "secret"}}
+        aws.download_file.side_effect = lambda bucket, key, path: Path(path).write_text(
+            "artifact"
+        )
+        hf.upload_folder.return_value = SimpleNamespace(oid="c" * 40)
+
+        class MissingEntry(Exception):
+            pass
+
+        def missing(**kwargs):
+            raise MissingEntry()
+
+        modules = {
+            "huggingface_hub": SimpleNamespace(
+                HfApi=lambda **kwargs: hf, hf_hub_download=missing
+            ),
+            "huggingface_hub.errors": SimpleNamespace(EntryNotFoundError=MissingEntry),
+        }
+        with (
+            patch.dict(sys.modules, modules),
+            patch.object(publish.boto3, "client", return_value=aws),
+            patch.object(publish, "get_json", side_effect=[None, manifest]),
+            patch.object(publish, "put_json") as save,
+            patch.object(
+                publish, "notify", side_effect=RuntimeError("backend unavailable")
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            publish.publish(args)
+        branch = "candidate-" + JOB["run_id"]
+        self.assertEqual(hf.create_branch.call_args.kwargs["branch"], branch)
+        self.assertEqual(hf.upload_folder.call_args.kwargs["revision"], branch)
+        saved = save.call_args.args[-1]
+        self.assertFalse(saved["notified"])
+        self.assertEqual(saved["candidate"]["hf_revision"], "c" * 40)
+        self.assertEqual(saved["candidate"]["output_contract"], "criteria_array_v1")
+
+    def test_completed_training_retries_publication_without_gpu(self):
+        storage = MemoryState()
+        storage.items["trained/" + JOB["checksum"]] = dict(JOB)
+        with (
+            patch.object(state, "S3", storage),
+            patch.object(transfer, "snapshot", return_value=dict(JOB)),
+        ):
+            result = transfer.prepare("ssm-command", "retry-execution")
+        self.assertFalse(result["train"])
+        self.assertTrue(result["publish"])
+        self.assertFalse(storage.items.get("lock"))
 
 
 class WorkflowTests(unittest.TestCase):
@@ -468,15 +597,15 @@ class WorkflowTests(unittest.TestCase):
         machine = json.loads((ROOT / "workflow.asl.json.tftpl").read_text())
         states = machine["States"]
         self.assertIn(machine["StartAt"], states)
-        for name, state in states.items():
-            targets = [state.get("Next"), state.get("Default")]
-            targets += [edge.get("Next") for edge in state.get("Choices", [])]
-            targets += [edge.get("Next") for edge in state.get("Catch", [])]
+        for name, node in states.items():
+            targets = [node.get("Next"), node.get("Default")]
+            targets += [edge.get("Next") for edge in node.get("Choices", [])]
+            targets += [edge.get("Next") for edge in node.get("Catch", [])]
             for target in filter(None, targets):
                 self.assertIn(target, states, (name, target))
-            if state["Type"] == "Task" and name != "FailAndStop":
-                self.assertEqual(state["Catch"][0]["Next"], "FailAndStop")
-                self.assertEqual(state["Catch"][0]["ResultPath"], "$.error")
+            if node["Type"] == "Task" and name != "FailAndStop":
+                self.assertEqual(node["Catch"][0]["Next"], "FailAndStop")
+                self.assertEqual(node["Catch"][0]["ResultPath"], "$.error")
         self.assertEqual(
             states["Initialize"]["Parameters"]["execution_id.$"], "$$.Execution.Id"
         )

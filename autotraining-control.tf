@@ -3,7 +3,7 @@ data "archive_file" "autotraining_lambda" {
   type        = "zip"
   output_path = "${path.module}/autotraining/lambda.zip"
   dynamic "source" {
-    for_each = toset(["coordinator.py", "transfer.py", "execution.py"])
+    for_each = toset(["coordinator.py", "transfer.py", "execution.py", "state.py"])
     content {
       content  = file("${path.module}/autotraining/${source.value}")
       filename = source.value
@@ -34,13 +34,18 @@ resource "aws_iam_role_policy" "autotraining_lambda" {
     Statement = [
       {
         Effect   = "Allow"
-        Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
-        Resource = aws_dynamodb_table.autotraining.arn
+        Action   = ["s3:GetObject"]
+        Resource = ["${aws_s3_bucket.autotraining.arn}/candidates/*", "${aws_s3_bucket.autotraining.arn}/publications/*", "${aws_s3_bucket.autotraining.arn}/control/*"]
       },
       {
         Effect   = "Allow"
-        Action   = ["s3:GetObject"]
-        Resource = ["${aws_s3_bucket.autotraining.arn}/candidates/*"]
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.autotraining.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:PutObject"]
+        Resource = ["${aws_s3_bucket.autotraining.arn}/control/*"]
       },
       {
         Effect   = "Allow"
@@ -85,15 +90,18 @@ resource "aws_lambda_function" "autotraining" {
   role             = aws_iam_role.autotraining_lambda.arn
   handler          = "coordinator.handler"
   runtime          = "python3.12"
-  timeout          = 600
+  timeout          = 120
   memory_size      = 256
   environment {
     variables = {
-      BACKEND_INSTANCE_ID  = aws_instance.llm.id
-      TRAINING_INSTANCE_ID = aws_instance.autotraining.id
-      ARTIFACT_BUCKET      = aws_s3_bucket.autotraining.bucket
-      STATE_TABLE          = aws_dynamodb_table.autotraining.name
-      TRAIN_LOG_GROUP      = aws_cloudwatch_log_group.autotraining.name
+      BACKEND_INSTANCE_ID      = aws_instance.llm.id
+      TRAINING_INSTANCE_ID     = aws_instance.autotraining.id
+      ARTIFACT_BUCKET          = aws_s3_bucket.autotraining.bucket
+      HF_REPO                  = var.autotraining_hf_repo
+      HF_TOKEN_PARAMETER       = var.autotraining_hf_token_parameter
+      CALLBACK_TOKEN_PARAMETER = var.autotraining_callback_token_parameter
+      CALLBACK_URL             = "http://${aws_instance.llm.private_ip}:8002/api/v1/training-runs"
+      TRAIN_LOG_GROUP          = aws_cloudwatch_log_group.autotraining.name
     }
   }
   depends_on = [

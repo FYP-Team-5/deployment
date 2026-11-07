@@ -34,6 +34,12 @@ print(m["version_id"],m["checksum"],m["row_count"])
 [[ "$version" =~ ^[a-f0-9-]{36}$ ]] || exit 2
 [[ "$checksum" =~ ^[a-f0-9]{64}$ ]] || exit 2
 
+# A checksum-addressed snapshot is reusable; avoid reading SeaweedFS every night.
+if aws s3api head-object --region "$region" --bucket "$bucket" --key "datasets/$checksum/dataset.csv" >/dev/null 2>&1; then
+    printf '{"version_id":"%s","checksum":"%s","row_count":%s}\n' "$version" "$checksum" "$rows"
+    exit 0
+fi
+
 # Transfer the exact version with the existing SHA-256 verifying reader.
 docker compose --project-directory /opt/fyp/backend exec -T api python - "$version" <<'PY' > "$temp"
 import shutil

@@ -7,10 +7,11 @@
       "Resource": "${lambda_arn}",
       "Parameters": {
         "action": "prepare",
-        "execution_id.$": "$.execution_id"
+        "execution_id.$": "$.execution_id",
+        "command_id.$": "$.export.command_id"
       },
       "ResultPath": "$.job",
-      "Next": "ShouldTrain",
+      "Next": "ExportReady",
       "Catch": [
         {
           "ErrorEquals": [
@@ -20,7 +21,7 @@
           "Next": "FailAndStop"
         }
       ],
-      "TimeoutSeconds": 620
+      "TimeoutSeconds": 140
     },
     "ShouldTrain": {
       "Type": "Choice",
@@ -29,6 +30,19 @@
           "Variable": "$.job.train",
           "BooleanEquals": true,
           "Next": "StartGPU"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.job.publish",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.job.publish",
+              "BooleanEquals": true
+            }
+          ],
+          "Next": "Publish"
         }
       ],
       "Default": "Skipped"
@@ -54,7 +68,7 @@
           "Next": "FailAndStop"
         }
       ],
-      "TimeoutSeconds": 620,
+      "TimeoutSeconds": 140,
       "Retry": [
         {
           "ErrorEquals": [
@@ -99,7 +113,7 @@
           "Next": "FailAndStop"
         }
       ],
-      "TimeoutSeconds": 620
+      "TimeoutSeconds": 140
     },
     "Ready": {
       "Type": "Choice",
@@ -150,7 +164,7 @@
           "Next": "FailAndStop"
         }
       ],
-      "TimeoutSeconds": 620,
+      "TimeoutSeconds": 140,
       "Retry": [
         {
           "ErrorEquals": [
@@ -194,7 +208,7 @@
           "Next": "FailAndStop"
         }
       ],
-      "TimeoutSeconds": 620,
+      "TimeoutSeconds": 140,
       "Retry": [
         {
           "ErrorEquals": [
@@ -217,7 +231,6 @@
         "execution_id.$": "$.execution_id"
       },
       "ResultPath": "$.result",
-      "End": true,
       "Catch": [
         {
           "ErrorEquals": [
@@ -227,7 +240,7 @@
           "Next": "FailAndStop"
         }
       ],
-      "TimeoutSeconds": 620,
+      "TimeoutSeconds": 140,
       "Retry": [
         {
           "ErrorEquals": [
@@ -240,7 +253,8 @@
           "MaxAttempts": 3,
           "BackoffRate": 2
         }
-      ]
+      ],
+      "Next": "Stopped"
     },
     "FailAndStop": {
       "Type": "Task",
@@ -251,7 +265,7 @@
         "error.$": "$.error"
       },
       "ResultPath": "$.result",
-      "Next": "Failed",
+      "Next": "FailureStopped",
       "Catch": [
         {
           "ErrorEquals": [
@@ -270,7 +284,7 @@
           "BackoffRate": 2
         }
       ],
-      "TimeoutSeconds": 620
+      "TimeoutSeconds": 140
     },
     "Failed": {
       "Type": "Fail",
@@ -281,7 +295,7 @@
       "Parameters": {
         "execution_id.$": "$$.Execution.Id"
       },
-      "Next": "Prepare"
+      "Next": "Snapshot"
     },
     "BootTimeout": {
       "Type": "Pass",
@@ -290,6 +304,161 @@
       },
       "ResultPath": "$.error",
       "Next": "FailAndStop"
+    },
+    "Snapshot": {
+      "Type": "Task",
+      "Resource": "${lambda_arn}",
+      "Parameters": {
+        "action": "snapshot"
+      },
+      "ResultPath": "$.export",
+      "Next": "InitExport",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "FailAndStop"
+        }
+      ],
+      "TimeoutSeconds": 140
+    },
+    "InitExport": {
+      "Type": "Pass",
+      "Result": 0,
+      "ResultPath": "$.export_attempt",
+      "Next": "WaitExport"
+    },
+    "WaitExport": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "Prepare"
+    },
+    "ExportReady": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.job.ready",
+          "BooleanEquals": true,
+          "Next": "ShouldTrain"
+        },
+        {
+          "Variable": "$.export_attempt",
+          "NumericGreaterThanEquals": 32,
+          "Next": "ExportTimeout"
+        }
+      ],
+      "Default": "NextExportAttempt"
+    },
+    "NextExportAttempt": {
+      "Type": "Pass",
+      "Parameters": {
+        "execution_id.$": "$.execution_id",
+        "export.$": "$.export",
+        "export_attempt.$": "States.MathAdd($.export_attempt, 1)"
+      },
+      "Next": "WaitExport"
+    },
+    "ExportTimeout": {
+      "Type": "Pass",
+      "Result": {
+        "Error": "DatasetExportTimeout"
+      },
+      "ResultPath": "$.error",
+      "Next": "FailAndStop"
+    },
+    "Stopped": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.result.stopped",
+          "BooleanEquals": true,
+          "Next": "Publish"
+        }
+      ],
+      "Default": "WaitStop"
+    },
+    "WaitStop": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "StopGPU"
+    },
+    "FailureStopped": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.result.stopped",
+          "BooleanEquals": true,
+          "Next": "Failed"
+        }
+      ],
+      "Default": "WaitFailureStop"
+    },
+    "WaitFailureStop": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "FailAndStop"
+    },
+    "Publish": {
+      "Type": "Task",
+      "Resource": "${lambda_arn}",
+      "Parameters": {
+        "action": "publish",
+        "job.$": "$.job"
+      },
+      "ResultPath": "$.publication",
+      "Next": "WaitPublication",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "FailAndStop"
+        }
+      ],
+      "TimeoutSeconds": 140
+    },
+    "PublicationStatus": {
+      "Type": "Task",
+      "Resource": "${lambda_arn}",
+      "Parameters": {
+        "action": "publication_status",
+        "job.$": "$.job",
+        "command_id.$": "$.publication.command_id"
+      },
+      "ResultPath": "$.published",
+      "Next": "PublicationDone",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "FailAndStop"
+        }
+      ],
+      "TimeoutSeconds": 140
+    },
+    "WaitPublication": {
+      "Type": "Wait",
+      "Seconds": 30,
+      "Next": "PublicationStatus"
+    },
+    "PublicationDone": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.published.done",
+          "BooleanEquals": true,
+          "Next": "Succeeded"
+        }
+      ],
+      "Default": "WaitPublication"
+    },
+    "Succeeded": {
+      "Type": "Succeed"
     }
   }
 }

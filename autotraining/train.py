@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import boto3
@@ -253,6 +254,7 @@ def run(args):
 
     manifest = {
         "status": "completed",
+        "completed_at": datetime.now(UTC).isoformat(),
         "dataset_checksum": args.checksum,
         "run_id": args.run_id,
         "configuration": configuration,

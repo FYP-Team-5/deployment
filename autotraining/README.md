@@ -1,113 +1,116 @@
-# Automated nightly QLoRA retraining
+# Nightly training, Hugging Face candidates and instructor deployment
 
-This feature is implemented in the `feat/autotraining` branch of `FYP-Team-5/deployment`.
-**Applying Terraform creates paid AWS resources.** The daily schedule is **disabled by default** for a safe first deployment. No existing backend/user-data or vLLM configuration is modified.
+EventBridge Scheduler starts the Standard Step Functions workflow at **00:10 Asia/Singapore**. The schedule is disabled by default until the first acceptance run succeeds.
 
-## Architecture
+## Infrastructure decisions
 
-- EventBridge Scheduler: **00:10 Asia/Singapore** nightly, once enabled.
-- Standard Step Functions: prepare, deduplicate, start GPU EC2, wait for SSM readiness, run training, poll, verify candidate, stop GPU. Failure branches also request EC2 stop.
-- Lambda coordinator: three modules (`coordinator.py`, `transfer.py`, `execution.py`), packaged with Terraform's archive provider.
-- Existing backend EC2: SSM executes `export_backend.sh` inside its host. The script uses the backend's **version ledger** and checksum-verifying SeaweedFS reader to retrieve a specific immutable ready CSV version. No public instructor authentication or SeaweedFS ingress is required.
-- Private AWS S3 bucket: checksum-addressed dataset snapshots, training runner scripts, evaluated candidate adapter, and `result.json`.
-- DynamoDB: permanent success markers for every trained checksum, per-execution run history, and one conditional GPU lock. Locks are released only after EC2 confirms it has stopped. Cleanup has a separate 11-minute lease to serialize duplicate events; an interrupted cleanup can be recovered after that lease expires.
-- Separate EC2 GPU instance: default `g6e.xlarge`, encrypted 200 GB root EBS, SSM-only management, no inbound security group rules. Terraform manages its initial state as stopped.
-- CloudWatch: Lambda execution logs and streaming training SSM output.
-- Recovery: terminal Step Functions events trigger cleanup for failures, timeouts and manual aborts. An independent 15-minute watchdog reconciles missed events and stops runs older than 14 hours, including failures before SSM is ready. The guest also has a best-effort 15-hour shutdown timer.
+| Component | Decision | Purpose |
+| --- | --- | --- |
+| DynamoDB | Removed from configuration | Small control records use the existing training S3 bucket. |
+| Lambda | Keep one small coordinator | Checks manifests, owns conditional locks, dispatches SSM commands and reconciles failures. Each invocation is short; Step Functions does all waiting. |
+| S3 | Keep one private, encrypted bucket | Durable dataset staging, scripts, recovery artifacts, publication receipts and control JSON. Training and HF upload can recover independently. |
+| PostgreSQL | Reuse backend database | Stores instructor-visible candidates, metrics, explicit deployment requests and the active model pointer. |
+| GPU EC2 | Keep separate and stopped while idle | Training runs on `g6e.xlarge`; HF publishing runs on the existing backend CPU host **after GPU shutdown**. |
 
-The runner installs Python 3.12 with pinned uv 0.9.10, rather than relying on Ubuntu 22.04's Python 3.10. It installs boto3 explicitly for artifact uploads. The PyTorch, Transformers and TRL package versions are pinned in `requirements.txt`; compatibility still requires a live GPU test. The default training reference is the committed notebook `Rubrics/Qlora Comparison/qlora (48r,96a).ipynb` from `FYP-Team-5/model`, pinned to commit `8a2b94ec95754d875dc546461ef15dc2a279ce5a`.
+Lambda could be replaced with more native Step Functions states and backend scripts. Keeping a small coordinator avoids moving cloud-control credentials and failure recovery into the quiz application. S3 can also be replaced with SeaweedFS, but that would require new private connectivity/credentials and couple artifacts and coordination to the backend host. Neither change is necessary for this workflow.
 
-## Training contract
+GPU training hours and the persistent 200 GB EBS volume are the main infrastructure items to review; removing tiny control records alone is not a large cost saving. No paid resources are changed by editing this repository.
 
-- Base model: `Qwen/Qwen3.5-9B`.
-- QLoRA: rank **48**, alpha **96**, dropout **0.05**, learning rate **5e-5**, 3 max epochs, microbatch **1** × gradient accumulation **8**, seed **42**, question-group split seed **42**.
-- Rank/alpha are selected from the project's [saved comparison](https://github.com/FYP-Team-5/model/blob/8a2b94ec95754d875dc546461ef15dc2a279ce5a/Rubrics/Qlora%20Comparison/qlora_evaluation_comparison.csv): rank 48 / alpha 96 achieved the highest exact-array accuracy (0.804627) and F1 (0.913386) among the tested ranks. This is the best tested configuration for that experiment, not a universal optimum for future datasets.
-- Training/validation sequences are capped at **4,096 tokens**. Longer examples fail explicitly instead of being silently truncated.
-- 4-bit NF4, double quantization, paged 8-bit AdamW, loss-based checkpoint selection, early stopping and the original notebook's evaluation routines are reused.
-- CSV validation requires the exact eight-column backend schema, JSON arrays of equal lengths, nonempty criteria, positive finite maxima, bounded finite awarded scores and matching totals. BOM, quoted commas/newlines, repeated question ids and blank submitted answers are supported. Validation errors report row numbers without logging student responses.
-- Dataset rows with rubric score **0** are mapped to binary label `0`; full-credit scores equal to their criterion maximum become `1`. **Partial-credit** rows and blank desired-answer rows are excluded and counted in the candidate manifest. If fewer than ten compatible unique questions remain, training fails with an explicit error. No arbitrary partial-credit threshold is used.
-- Every training run starts from the original base checkpoint. Resulting adapters are stored only as **candidates** in private S3; **production vLLM and Hugging Face repos are not automatically replaced**.
+## Workflow and recovery
 
-## Prerequisites
+1. SSM reads the backend's latest **ready immutable** SeaweedFS dataset and stages its checksum-addressed CSV in S3. An existing snapshot is reused without reading SeaweedFS again.
+2. A successfully published checksum skips. A completed training run whose HF upload or REST notification failed goes directly to publication, without starting the GPU.
+3. A new checksum claims `control/lock.json` using S3 `If-None-Match` / `If-Match` conditional writes. A single GPU owner and a separate short cleanup lease serialize overlap and delayed cleanup events.
+4. Start EC2, wait for SSM readiness, download/validate/train/evaluate, and save an evaluated adapter plus manifest in S3.
+5. Request EC2 stop, poll its state in Step Functions, and release the lock only after **stopped** is confirmed. Lambda never sleeps through EC2 shutdown or SSM commands; its timeout is 120 seconds.
+6. On the existing backend host, `publish.sh`/`publish.py` download the evaluated adapter and upload it to **`SmuFypTeam5/GradingQlora`**, branch **`candidate-<run-id>`**. The production `main` branch is untouched. Only adapter files, configuration and evaluation metadata are uploaded; student CSVs and per-student predictions are excluded.
+7. Save the exact HF commit and an S3 publication receipt, then `POST /api/v1/training-runs` to the backend with a machine-only token. Retries reuse that commit and replay the idempotent callback. Only an acknowledged callback creates the published-checksum marker.
+8. Instructors open **Dashboard → Trained models**, compare candidate and base-model metrics, inspect configuration/history and explicitly request deployment. Uploading/reporting alone never activates a model.
 
-1. Deploy the current `main` stack first and ensure it is healthy, SSM-managed, and has the backend dataset worker / SeaweedFS running.
-2. Publish at least one **ready** training CSV containing enough compatible unique rubric questions. This is an instructor-created or automatically exported backend dataset; pending versions are not eligible.
-3. Ensure the AWS account/region offers the specified GPU type and has sufficient vCPU quota. Change `autotraining_instance_type` if necessary. The initial GPU instance is provisioned and stopped by Terraform.
-4. Allow AWS IAM, EC2, S3, DynamoDB, Lambda, Systems Manager, CloudWatch, Step Functions and EventBridge Scheduler resource creation, plus the archive Terraform provider.
-5. Confirm enough EBS capacity, CUDA-compatible GPU drivers, package download access, Hugging Face model download access, and backend host Docker Compose / AWS CLI. The SSM scripts install basic missing system tools when needed.
-6. Maintain backups of the **serving EC2's** PostgreSQL and SeaweedFS volumes: the original deployment's user-data has `user_data_replace_on_change = true`. **Never apply a plan that replaces `aws_instance.llm` without a backup.**
+The backend stores the exact dataset version/checksum, run id, HF branch/commit, evaluation timestamp, metrics and effective configuration. Deployment is durable: a database worker downloads the pinned HF revision, checks base model/rank/files, loads a separate vLLM adapter alias, and tests positive/negative grading responses. The active pointer changes only after checks pass. A failure preserves the prior pointer and is visible with a retry action. Previous candidates can be selected again for rollback.
 
-## Review and deploy (AWS credentials required)
+The training notebook emits binary criterion arrays. The backend supports this contract explicitly: validated labels map to the saved rubric weights and criterion ids; feedback lists met/unmet criteria. **Few-shot grading continues using the original configured model.** Each accepted grading job snapshots its model name, output contract and HF commit, including partial submissions/retries, so a deployment does not switch work already accepted.
 
-From the deployment repository root:
+The serving filesystem resolver reloads approved adapters after vLLM restarts. If the host loses its adapter cache, grading restores the job's pinned files from HF. PostgreSQL and HF remain required for this recovery.
+
+## Training configuration
+
+The pinned reference is `Rubrics/Qlora Comparison/qlora (48r,96a).ipynb` at model-repo commit `8a2b94ec95754d875dc546461ef15dc2a279ce5a`:
+
+- `Qwen/Qwen3.5-9B`, LoRA **rank 48 / alpha 96**, dropout 0.05, learning rate 5e-5, up to 3 epochs, microbatch 1 × accumulation 8, seeds 42.
+- NF4 4-bit/double quantization, bf16 when supported, paged 8-bit AdamW, gradient checkpointing, completion-only loss, early stopping and validation-loss checkpoint selection.
+- Question-group 80/10/10 split; 4,096-token training/validation limit (oversized examples fail instead of truncating labels). Partial-credit rows and missing desired answers are counted and excluded; at least ten compatible unique questions are required.
+- Strict backend eight-column CSV schema, JSON arrays, finite bounded scores, positive maxima and consistent totals. UTF-8 BOM, quoted commas/newlines and repeated question ids are preserved.
+- Python 3.12 is installed with uv 0.9.10. Exact resolved package versions, model revision and notebook hash are saved with each candidate. A real GPU compatibility run is still required.
+
+Rank 48 / alpha 96 had the highest exact-array accuracy (0.804627) and F1 (0.913386) in the project's [saved rank comparison](https://github.com/FYP-Team-5/model/blob/8a2b94ec95754d875dc546461ef15dc2a279ce5a/Rubrics/Qlora%20Comparison/qlora_evaluation_comparison.csv). This is the best tested configuration for that experiment, not a guarantee for future data. The current [Unsloth guide](https://unsloth.ai/docs/models/qwen3.5/fine-tune) favors bf16 LoRA because of quantization differences; review each candidate's actual evaluation before deployment.
+
+## Configure credentials and serving
+
+1. Deploy the updated **backend and frontend** application repositories. Backend schema initialization uses `create_all()`; no migration scripts are added.
+2. Create existing SSM **SecureString** parameters in the deployment region (names configurable via Terraform):
+   - `/fyp/training/hf-token`: a token with write access to `SmuFypTeam5/GradingQlora`.
+   - `/fyp/training/callback-token`: a strong random machine credential.
+   Terraform grants the existing backend EC2 role access to these names; secret values never enter Terraform configuration/state. A custom KMS key also needs an appropriate decrypt policy.
+3. Set backend `.env` values, then rebuild/restart its Compose service:
+   - `TRAINING_CALLBACK_TOKEN`: exactly the callback SecureString value.
+   - `TRAINING_HF_REPO=SmuFypTeam5/GradingQlora`.
+   - `TRAINING_HF_TOKEN`: repo-scoped read access if private HF commits require it.
+   - `MODEL_ADAPTER_DIRECTORY=/mnt/llm-data/adapters` (shared with the host at the same path).
+4. Install the updated serving wrapper at `/opt/qwen-vllm/Script/serve_qwen35_vllm.sh` on the serving host. Add a systemd override to `qwen-vllm.service`:
+
+   ```ini
+   [Service]
+   Environment=FYP_LORA_RUNTIME_ENABLED=true
+   Environment=FYP_LORA_ADAPTER_DIRECTORY=/mnt/llm-data/adapters
+   Environment=FYP_VLLM_MAX_CPU_LORAS=4
+   ```
+
+   Reload systemd and restart vLLM during a suitable window. The opt-in enables runtime LoRA loading and the filesystem resolver. TCP 8000 must stay private; browsers use the authenticated backend deployment API. This does **not** require editing EC2 user-data or replacing the serving instance.
+
+The callback uses the serving instance's private IPv4 address on port 8002. HF upload is performed by its SSM-managed host, not Lambda or the GPU. Both host package installation and HF access require outbound network access.
+
+## Deploy and enable
 
 ```bash
 terraform init
-terraform fmt
 terraform validate
 terraform plan -out=autotraining.tfplan
-# Inspect the plan. The existing aws_instance.llm must not be replaced.
+# Review the plan: do not replace aws_instance.llm and its local data.
 terraform apply autotraining.tfplan
-```
 
-The schedule remains disabled. Perform a first manual run:
-
-```bash
 aws stepfunctions start-execution \
   --region "$(terraform output -raw region)" \
   --state-machine-arn "$(terraform output -raw autotraining_state_machine_arn)" \
   --input '{}'
 ```
 
-Inspect the execution in Step Functions, then inspect:
+Verify a full GPU run, EC2 stop, HF candidate branch, callback, instructor metrics, a passing explicit deployment, a failing deployment leaving production intact, and an unchanged-checksum skip. Then persist `autotraining_schedule_enabled = true` in a local ignored `.auto.tfvars` file and apply a reviewed plan. Set it false to disable nightly starts; the recovery watchdog stays enabled. Do not apply Terraform during training: it manages the trainer's idle state as stopped.
 
-```bash
-aws logs tail "/fyp/fyp-qwen-vllm/training" --region us-east-1 --follow
-aws logs tail "/aws/lambda/fyp-qwen-vllm-training-coordinator" --region us-east-1 --follow
-aws s3 ls "s3://$(terraform output -raw autotraining_s3_bucket)/candidates/" --recursive
-```
+**Upgrading the DynamoDB prototype:** stop all executions and confirm the trainer is stopped. Back up/export any existing DynamoDB history and carry completed checksums/artifact identities into S3 control records before removing the table. The new configuration removes the DynamoDB resource, so a plan against an already-deployed prototype can destroy that table. Never discard a live GPU ownership record or apply that destructive change without preserving required history. This repository change does not run Terraform apply.
 
-Substitute the actual Terraform name and region if overridden. A successful run stores an adapter, tokenizer, effective training configuration, package versions, resolved base-model revision, notebook hash, baseline metrics and candidate metrics under `candidates/<dataset-sha256>/<run-id>/`. Separate retry executions have separate artifact paths. A manifest is published last; only a completed manifest with matching run/version/checksum and adapter objects can advance the trained marker. The same ready dataset checksum on a subsequent run must skip starting the GPU, including when that checksum was trained before a different dataset. A missing ready dataset also skips without starting EC2. Failed attempts remain retryable on the next nightly/manual execution.
+## Storage, diagnostics and verification
 
-DynamoDB item keys are `run#<run-id>` for execution status/history, `success#<checksum>` for completed dataset training, `latest` for the latest completed candidate, and `lock` for the current owner. The run id is the first 32 hex characters of SHA-256 of the Step Functions execution ARN. Run statuses are `running`, `candidate_saved`, `completed`, `failed` and `skipped`. Failure details and the S3 manifest key are retained; metrics and configuration live in the manifest. No TTL is set on these records or the active lock. Failed CSV validation or model evaluation never advances a success marker.
+- `datasets/<sha256>/dataset.csv`: immutable staging; SeaweedFS remains the dataset system of record.
+- `candidates/<sha256>/<run-id>/`: adapter, effective configuration and evaluated `result.json`. After HF publication and an acknowledged backend callback, objects receive a `published=true` tag. A lifecycle rule expires published staging objects older than 30 days (noncurrent versions after 30 noncurrent days); HF retains the pinned published commit. Unpublished artifacts are excluded.
+- `publications/<run-id>/result.json`: exact HF commit, callback payload and acknowledgement.
+- `control/{lock,latest}.json`, `control/runs/<run-id>.json`, `control/trained/<checksum>.json`, `control/success/<checksum>.json`: small JSON coordination/history records. Do not expire current control records or unpublished artifacts.
+- CloudWatch: `/fyp/<name>/training` and `/aws/lambda/<name>-training-coordinator`. HF publication SSM commands expose status/errors on the backend host.
 
-Enable nightly automation only after the manual run is successful:
-
-```bash
-# Persist this setting so future plans do not revert to the default false.
-printf 'autotraining_schedule_enabled = true\n' > autotraining.auto.tfvars
-terraform plan -out=enable.tfplan
-terraform apply enable.tfplan
-```
-
-To disable it again set `autotraining_schedule_enabled = false` in that file and apply the reviewed plan. Local `*.tfvars` files are ignored by Git. Disabling nightly starts leaves the cleanup watchdog enabled. Running `terraform apply` during active training may conflict with the Terraform-managed **stopped** EC2 state.
-
-## Verification and operational expectations
-
-The CI workflow `.github/workflows/autotraining.yml` runs Python syntax checks, shell syntax checks, offline unit tests, Terraform formatting and `terraform validate`. Locally, the lightweight tests can be run with:
+Terminal Step Functions events trigger owner-checked cleanup. An independent 15-minute watchdog reconciles missed events and executions older than 14 hours; the guest has a best-effort 15-hour shutdown timer. SSM training timeout is 12 hours. AWS control-plane/IAM outages can delay cleanup; inspect the GPU and retain the lock until stop is confirmed. S3 bucket versioning preserves overwrites but has storage costs. Noncurrent control versions expire after 30 days; current history/locks and publication receipts remain. Abandoned multipart uploads are aborted after seven days. A stopped GPU still incurs EBS charges.
 
 ```bash
 python -m pip install boto3 ruff
 python -m unittest discover -s autotraining/tests -v
+ruff check autotraining
 bash -n autotraining/export_backend.sh
 bash -n autotraining/run_training.sh
-ruff check autotraining
+bash -n autotraining/publish.sh
+bash -n Script/serve_qwen35_vllm.sh
+terraform fmt -check autotraining-*.tf
+terraform validate
 ```
 
-Manual acceptance criteria: successful immutable dataset export; no EC2 start on unchanged checksum; one EC2 start with new checksum; SSM readiness then completion or failure; candidate artifact and nonempty metrics; existing vLLM unchanged; EC2 stopped after both successful and failing runs; CloudWatch logs available; no publicly exposed datasets.
+Backend tests cover callback authentication/idempotency, instructor authorization, stale deployment rejection, failure isolation, strict binary outputs and weighted grading/model snapshots. Frontend ESLint, TypeScript and the production build cover the instructor screen. Live AWS/GPU/HF/vLLM acceptance remains necessary; offline checks cannot establish capacity, credentials or runtime compatibility.
 
-### Important limits
-
-- Actual AWS/Terraform/GPU execution **must be verified in your AWS account**; offline unit tests alone cannot prove this deployment works in a real region with the selected GPU AMI.
-- There is no automatic promotion to the production grading model. The notebook outputs a binary-array grading adapter, while the current backend expects `score`, `feedback`, and `criteria_met` JSON objects. Promotion must address this mismatch and pass a separate fixed benchmark.
-- Terminal events are best effort, so the independent watchdog also checks execution state every 15 minutes. Cleanup retries retain the GPU lock on stop failure. During an AWS control-plane/IAM outage, inspect the GPU state and stop it manually if needed; never delete its lock while a training process may still be running. The SSM command has a 12-hour execution timeout; the external watchdog enforces a 14-hour budget with up to 15 minutes polling delay.
-- If upgrading an older prototype with a legacy checksum-only `lock` item, stop/confirm the GPU is stopped and remove that legacy lock before enabling runs. New locks identify the owning Step Functions execution.
-- QLoRA is retained to match the project's tested configuration and this workflow. The current [Unsloth Qwen3.5 guidance](https://unsloth.ai/docs/models/qwen3.5/fine-tune) favors bf16 LoRA because of quantization differences. Evaluate new candidates against the saved baseline; candidate creation does not assert a quality improvement.
-- A stopped GPU EC2 instance still incurs EBS charges; S3, DynamoDB, CloudWatch, networking, and Step Functions can also incur charges.
-- The candidate S3 bucket is versioned. Back up valuable artifacts before cleanup; `terraform destroy` cannot delete a nonempty versioned bucket until its object versions are removed.
-
-## AWS orchestration references
-
-- [EventBridge Scheduler cron expressions and time zones](https://docs.aws.amazon.com/scheduler/latest/UserGuide/schedule-types.html): `cron(10 0 * * ? *)`, `Asia/Singapore`, flexible window off (minute-level precision).
-- [Step Functions execution status events](https://docs.aws.amazon.com/step-functions/latest/dg/eventbridge-integration.html): terminal event matching and best-effort delivery semantics.
-- [PEFT quantized training](https://huggingface.co/docs/peft/developer_guides/quantization): NF4, double quantization and bf16 computation.
+References: [S3 conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html), [HF uploads](https://huggingface.co/docs/huggingface_hub/guides/upload), [vLLM runtime LoRA/resolvers](https://docs.vllm.ai/en/stable/features/lora/), [Step Functions terminal events](https://docs.aws.amazon.com/step-functions/latest/dg/eventbridge-integration.html).

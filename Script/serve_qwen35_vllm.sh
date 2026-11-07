@@ -14,6 +14,13 @@ BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3.5-9B}"
 BASE_MODEL_NAME="${BASE_MODEL_NAME:-qwen35-9b-base}"
 LORA_MODEL_NAME="${LORA_MODEL_NAME:-qwen35-9b-grading-qlora}"
 LORA_PATH="${LORA_PATH:-SmuFypTeam5/GradingQlora}"
+# Opt-in on the private serving host; backend deploys only approved commit-pinned adapters.
+if [[ "${FYP_LORA_RUNTIME_ENABLED:-false}" == "true" ]]; then
+    export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+    export VLLM_PLUGINS=lora_filesystem_resolver
+    export VLLM_LORA_RESOLVER_CACHE_DIR="${FYP_LORA_ADAPTER_DIRECTORY:-/mnt/llm-data/adapters}"
+    mkdir -p "$VLLM_LORA_RESOLVER_CACHE_DIR"
+fi
 
 # Use FYP_VLLM_* for wrapper CLI options: vLLM itself reserves the VLLM_* prefix
 # and logs warnings for unknown entries. VLLM_USE_FLASHINFER_SAMPLER is a real vLLM env var.
@@ -26,6 +33,7 @@ GPU_MEMORY_UTILIZATION="${FYP_VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
 # vLLM 0.29 accepts 1, 8, 16, 32, 64, ... but not 48.
 # The grading LoRA uses rank 48; reserve rank 64 to serve it.
 MAX_LORA_RANK="${FYP_VLLM_MAX_LORA_RANK:-64}"
+MAX_CPU_LORAS="${FYP_VLLM_MAX_CPU_LORAS:-4}"
 QUANTIZATION="${FYP_VLLM_QUANTIZATION:-bitsandbytes}"
 ENFORCE_EAGER="${FYP_VLLM_ENFORCE_EAGER:-1}"
 USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
@@ -171,6 +179,7 @@ vllm_args=(
     --enable-lora
     --lora-modules "${LORA_MODEL_NAME}=${LORA_PATH}"
     --max-lora-rank "$MAX_LORA_RANK"
+    --max-cpu-loras "$MAX_CPU_LORAS"
     --dtype "$DTYPE"
     --max-model-len "$MAX_MODEL_LEN"
     --max-num-seqs "$MAX_NUM_SEQS"
