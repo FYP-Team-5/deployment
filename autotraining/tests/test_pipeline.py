@@ -225,11 +225,12 @@ class RunnerTests(unittest.TestCase):
                 version_id=JOB["version_id"],
                 run_id=JOB["run_id"],
             )
-            hf = SimpleNamespace(
-                HfApi=lambda: SimpleNamespace(
+            api_factory = MagicMock(
+                return_value=SimpleNamespace(
                     model_info=lambda _: SimpleNamespace(sha="fixed-revision")
                 )
             )
+            hf = SimpleNamespace(HfApi=api_factory)
             s3 = MagicMock()
             with (
                 patch.dict(sys.modules, {"huggingface_hub": hf}),
@@ -237,6 +238,7 @@ class RunnerTests(unittest.TestCase):
                 patch("importlib.metadata.version", return_value="test-version"),
             ):
                 train.run(args)
+            api_factory.assert_called_once_with(token=False)
             manifest = json.loads(s3.put_object.call_args.kwargs["Body"])
             self.assertEqual(manifest["run_id"], JOB["run_id"])
             self.assertEqual(manifest["configuration"]["LORA_R"], 48)
@@ -517,6 +519,7 @@ class PublicationTests(unittest.TestCase):
             args.callback_url, "secret", receipt["candidate"]
         )
         self.assertTrue(save.call_args.args[-1]["notified"])
+        aws.get_parameter.assert_called_once_with(Name="/callback", WithDecryption=True)
 
     def test_fresh_publication_writes_candidate_branch_then_saves_receipt_before_callback(
         self,
@@ -554,9 +557,11 @@ class PublicationTests(unittest.TestCase):
         def missing(**kwargs):
             raise MissingEntry()
 
+        api_factory = MagicMock(return_value=hf)
+        public_download = MagicMock(side_effect=missing)
         modules = {
             "huggingface_hub": SimpleNamespace(
-                HfApi=lambda **kwargs: hf, hf_hub_download=missing
+                HfApi=api_factory, hf_hub_download=public_download
             ),
             "huggingface_hub.errors": SimpleNamespace(EntryNotFoundError=MissingEntry),
         }
@@ -574,6 +579,11 @@ class PublicationTests(unittest.TestCase):
         branch = "candidate-" + JOB["run_id"]
         self.assertEqual(hf.create_branch.call_args.kwargs["branch"], branch)
         self.assertEqual(hf.upload_folder.call_args.kwargs["revision"], branch)
+        self.assertIs(public_download.call_args.kwargs["token"], False)
+        self.assertEqual(
+            [call.kwargs["token"] for call in api_factory.call_args_list],
+            ["secret", False],
+        )
         saved = save.call_args.args[-1]
         self.assertFalse(saved["notified"])
         self.assertEqual(saved["candidate"]["hf_revision"], "c" * 40)

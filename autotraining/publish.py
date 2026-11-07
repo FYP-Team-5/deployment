@@ -70,9 +70,6 @@ def publish(args):
     ):
         raise ValueError("Invalid run identity")
     s3, ssm = boto3.client("s3"), boto3.client("ssm")
-    hf_token = ssm.get_parameter(Name=args.hf_token_parameter, WithDecryption=True)[
-        "Parameter"
-    ]["Value"]
     callback_token = ssm.get_parameter(
         Name=args.callback_token_parameter, WithDecryption=True
     )["Parameter"]["Value"]
@@ -90,7 +87,12 @@ def publish(args):
         from huggingface_hub import HfApi, hf_hub_download
         from huggingface_hub.errors import EntryNotFoundError
 
+        # Public reads remain anonymous; the upload credential is used only for writes.
+        hf_token = ssm.get_parameter(Name=args.hf_token_parameter, WithDecryption=True)[
+            "Parameter"
+        ]["Value"]
         api = HfApi(token=hf_token)
+        public_api = HfApi(token=False)
         branch = "candidate-" + args.run_id
         api.create_branch(repo_id=args.repo, branch=branch, exist_ok=True)
         # Reconcile a crash after HF committed but before the S3 receipt was saved.
@@ -102,7 +104,7 @@ def publish(args):
                         repo_id=args.repo,
                         filename="candidate.json",
                         revision=branch,
-                        token=hf_token,
+                        token=False,
                     )
                 ).read_text()
             )
@@ -110,7 +112,7 @@ def publish(args):
                 previous.get("run_id") == args.run_id
                 and previous.get("dataset_checksum") == args.checksum
             ):
-                revision = api.model_info(args.repo, revision=branch).sha
+                revision = public_api.model_info(args.repo, revision=branch).sha
         except EntryNotFoundError:
             pass
         if revision is None:

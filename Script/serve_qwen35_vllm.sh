@@ -2,6 +2,9 @@
 
 set -Eeuo pipefail
 
+# Both model repositories are public; serving does not need HF credentials.
+export HF_HUB_DISABLE_IMPLICIT_TOKEN=1
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-${SCRIPT_DIR}/requirements-vllm.txt}"
 VENV_DIR="${VENV_DIR:-${SCRIPT_DIR}/.venv}"

@@ -105,7 +105,7 @@ variable "autotraining_hf_repo" {
   default = "SmuFypTeam5/GradingQlora"
 }
 variable "autotraining_hf_token_parameter" {
-  description = "Existing SSM SecureString containing a repo-scoped HF write token; value is never stored in Terraform."
+  description = "Existing SSM SecureString containing the HF token used only for branch creation/uploads; public reads need no token."
   type        = string
   default     = "/fyp/training/hf-token"
 }

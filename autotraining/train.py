@@ -114,7 +114,7 @@ def run(args):
     from huggingface_hub import HfApi
 
     # Resolve once so tokenizer and model cannot load different upstream revisions.
-    base_revision = HfApi().model_info("Qwen/Qwen3.5-9B").sha
+    base_revision = HfApi(token=False).model_info("Qwen/Qwen3.5-9B").sha
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     # Execute the exact reference training/evaluation code cells in the original order.
@@ -130,16 +130,16 @@ def run(args):
         if number in (18, 22):
             code = code.replace(
                 "from_pretrained(MODEL_ID)",
-                "from_pretrained(MODEL_ID, revision=BASE_REVISION)",
+                "from_pretrained(MODEL_ID, revision=BASE_REVISION, token=False)",
             )
             code = code.replace(
                 "MODEL_ID, quantization_config=",
-                "MODEL_ID, revision=BASE_REVISION, quantization_config=",
+                "MODEL_ID, revision=BASE_REVISION, token=False, quantization_config=",
             )
         if number == 4:
             code = code.replace(
                 'hf_token = os.environ["HF_TOKEN"]',
-                'hf_token = os.environ.get("HF_TOKEN", "")',
+                "hf_token = None",
             )
         if number == 14:
             code = code.replace(
