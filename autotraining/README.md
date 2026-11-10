@@ -102,9 +102,9 @@ terraform apply autotraining.tfplan
 
 Review the plan before applying; avoid replacing the serving instance or applying during training. The schedule remains disabled.
 
-After applying, set backend `TRAINING_STATE_MACHINE_ARN` to `terraform output -raw autotraining_state_machine_arn`, then rebuild/restart the backend and updated frontend. The backend uses the serving EC2 instance role; Terraform grants `states:StartExecution` only for this workflow and sets the IMDSv2 response hop limit to 2 so the Docker container can obtain role credentials. No AWS access keys belong in the frontend or backend `.env`.
+New deployments set backend `TRAINING_STATE_MACHINE_ARN` automatically. For existing hosts, set it to `terraform output -raw autotraining_state_machine_arn`, then rebuild/restart the backend and updated frontend. The backend uses the serving EC2 instance role; Terraform grants `states:StartExecution` only for this workflow and sets the IMDSv2 response hop limit to 2 so the Docker container can obtain role credentials. No AWS access keys belong in the frontend or backend `.env`.
 
-Sign in as an instructor, open **Trained models**, and select **Start training** to request one run on the latest ready dataset. The page shows acceptance or an error and refreshes candidates automatically. A request can be skipped by the workflow if no new ready dataset is available or the GPU is busy. Training does not activate the resulting model; review and deploy the candidate separately. Failed browser requests retain their request ID so retries cannot start the same request twice.
+Sign in as an instructor, open **Trained models**, and select **Train now** to request one run on the latest ready dataset at any time. Manual requests retrain an unchanged dataset; the GPU lock still skips overlapping runs. The page shows acceptance or an error and refreshes candidates automatically. Training publishes only a candidate branch and does not activate the resulting model; review and deploy it separately. Failed browser requests retain their request ID so retries cannot start the same request twice.
 
 Alternatively, start one manual run from the CLI:
 
@@ -114,6 +114,12 @@ aws stepfunctions start-execution \
   --state-machine-arn "$(terraform output -raw autotraining_state_machine_arn)" \
   --input '{}'
 ```
+
+The empty input keeps scheduled-run behaviour, including checksum deduplication.
+Use `--input '{"force_retrain":true}'` to request fresh training of the latest
+ready CSV even if its checksum was published previously. Neither input bypasses
+the GPU lock. The reusable one-row execution test lives in the backend at
+`app/demo/training/`; it saves only local weights and does not publish a candidate.
 
 Confirm GPU shutdown, the HF candidate branch, backend metrics and instructor deployment checks. Then save this in a local `nightly.auto.tfvars` file:
 

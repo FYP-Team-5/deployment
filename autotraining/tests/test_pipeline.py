@@ -280,6 +280,54 @@ class CoordinatorTests(unittest.TestCase):
         self.assertFalse(self.prepare()["train"])
         self.assertFalse(self.db.items.get("lock", {}).get("execution_id"))
 
+    def test_manual_request_retrains_even_a_published_checksum(self):
+        self.db.items["success/" + JOB["checksum"]] = {"checksum": JOB["checksum"]}
+        self.db.items["trained/" + JOB["checksum"]] = dict(JOB)
+        with patch.object(transfer, "snapshot", return_value=dict(JOB)):
+            result = transfer.prepare(
+                "command",
+                JOB["execution_id"],
+                {
+                    "force_retrain": True,
+                    "requested_by": "2000001",
+                },
+            )
+        self.assertTrue(result["train"])
+        self.assertEqual(result["requested_by"], "2000001")
+        self.assertEqual(self.db.items["lock"]["execution_id"], JOB["execution_id"])
+
+    def test_manual_request_still_cannot_overlap_gpu_owner(self):
+        self.db.items["lock"] = dict(JOB, execution_id="another-execution")
+        with patch.object(transfer, "snapshot", return_value=dict(JOB)):
+            result = transfer.prepare(
+                "command", JOB["execution_id"], {"force_retrain": True}
+            )
+        self.assertEqual(result["reason"], "already_running")
+        self.assertEqual(self.db.items["lock"]["execution_id"], "another-execution")
+
+    def test_unpublished_manual_rerun_is_not_masked_by_older_success(self):
+        self.db.items["success/" + JOB["checksum"]] = dict(JOB, run_id="old-run")
+        self.db.items["trained/" + JOB["checksum"]] = dict(JOB, run_id="new-run")
+        result = self.prepare()
+        self.assertFalse(result["train"])
+        self.assertTrue(result["publish"])
+        self.assertEqual(result["run_id"], "new-run")
+        self.assertNotIn("lock", self.db.items)
+
+    def test_manual_request_replay_reuses_the_same_run(self):
+        with patch.object(transfer, "snapshot", return_value=dict(JOB)):
+            first = transfer.prepare(
+                "command", JOB["execution_id"], {"force_retrain": True}
+            )
+            replay = transfer.prepare(
+                "command", JOB["execution_id"], {"force_retrain": True}
+            )
+        self.assertEqual(first["run_id"], replay["run_id"])
+
+    def test_force_flag_must_be_a_boolean(self):
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            transfer.prepare("command", JOB["execution_id"], {"force_retrain": "false"})
+
     def test_previously_trained_checksum_skips_even_if_latest_changed(self):
         self.db.items["success/" + JOB["checksum"]] = {"checksum": JOB["checksum"]}
         self.db.items["latest"] = {"checksum": "c" * 64}
@@ -620,6 +668,9 @@ class WorkflowTests(unittest.TestCase):
             states["Initialize"]["Parameters"]["execution_id.$"], "$$.Execution.Id"
         )
         self.assertIn("execution_id.$", states["NextAttempt"]["Parameters"])
+        self.assertEqual(states["Initialize"]["Parameters"]["request.$"], "$")
+        for name in ("Prepare", "NextExportAttempt", "NextAttempt"):
+            self.assertEqual(states[name]["Parameters"]["request.$"], "$.request")
 
 
 if __name__ == "__main__":

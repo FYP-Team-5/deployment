@@ -172,12 +172,13 @@ resource "aws_instance" "llm" {
   }
 
   user_data_base64 = base64encode(templatefile("${path.module}/user-data.sh.tftpl", {
-    serve_script         = base64gzip(file("${path.module}/Script/serve_qwen35_vllm.sh"))
-    requirements         = base64gzip(file("${path.module}/Script/requirements-vllm.txt"))
-    aws_region           = var.aws_region
-    cloud_init_log_group = aws_cloudwatch_log_group.cloud_init.name
-    vllm_log_group       = aws_cloudwatch_log_group.vllm.name
-    hf_token_parameter   = var.vllm_hf_token_parameter
+    serve_script               = base64gzip(file("${path.module}/Script/serve_qwen35_vllm.sh"))
+    requirements               = base64gzip(file("${path.module}/Script/requirements-vllm.txt"))
+    aws_region                 = var.aws_region
+    cloud_init_log_group       = aws_cloudwatch_log_group.cloud_init.name
+    vllm_log_group             = aws_cloudwatch_log_group.vllm.name
+    hf_token_parameter         = var.vllm_hf_token_parameter
+    training_state_machine_arn = "arn:${data.aws_partition.vllm.partition}:states:${var.aws_region}:${data.aws_caller_identity.vllm.account_id}:stateMachine:${var.name}-nightly-training"
   }))
   user_data_replace_on_change = true
 

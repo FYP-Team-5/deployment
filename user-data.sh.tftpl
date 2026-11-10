@@ -140,6 +140,7 @@ set_env "$backend_env" LLM_URL "http://host.docker.internal:8000/v1/chat/complet
 set_env "$backend_env" LLM_MODEL "qwen35-9b-grading-qlora"
 set_env "$backend_env" LLM_GRADING_CONTRACT "criteria_array_v1"
 set_env "$backend_env" LLM_FEEDBACK_MODEL "qwen35-9b-feedback-qlora"
+set_env "$backend_env" TRAINING_STATE_MACHINE_ARN "${training_state_machine_arn}"
 
 # NEXT_PUBLIC variables are embedded in the frontend image during the build.
 set_env "$frontend_env" NEXT_PUBLIC_API_URL "http://$public_ip:8002"
