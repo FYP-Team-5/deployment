@@ -21,9 +21,25 @@ class ServingWrapperTests(unittest.TestCase):
         python_stub.chmod(0o755)
         vllm_stub = self.directory / "vllm-stub"
         vllm_stub.write_text(
-            f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n"
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "expected = os.environ.get('TEST_EXPECT_HF_TOKEN')\n"
+            "if expected and os.environ.get('HF_TOKEN') != expected:\n"
+            "    sys.exit('Expected HF token was not passed to vLLM')\n"
+            "print(json.dumps(sys.argv[1:]))\n"
         )
         vllm_stub.chmod(0o755)
+        aws_stub = self.directory / "aws"
+        aws_stub.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['TEST_SSM_LOG']).write_text(json.dumps(sys.argv[1:]))\n"
+            "if os.environ.get('TEST_SSM_ERROR') == '1':\n"
+            "    sys.exit('Simulated AccessDenied')\n"
+            "print(os.environ.get('TEST_SSM_TOKEN', 'fixture-token-from-ssm'))\n"
+        )
+        aws_stub.chmod(0o755)
         for name in ("grading", "feedback"):
             adapter = self.directory / name
             adapter.mkdir()
@@ -31,6 +47,15 @@ class ServingWrapperTests(unittest.TestCase):
             (adapter / "adapter_model.safetensors").touch()
         self.environment = {
             **os.environ,
+            "PATH": str(self.directory)
+            + os.pathsep
+            + os.environ.get("PATH", "/usr/bin:/bin"),
+            "HF_TOKEN": "",
+            "HF_TOKEN_SSM_PARAMETER": "",
+            "HF_TOKEN_SSM_REGION": "us-east-1",
+            "TEST_SSM_LOG": str(self.directory / "ssm-request.json"),
+            "TEST_SSM_ERROR": "0",
+            "TEST_EXPECT_HF_TOKEN": "",
             "FYP_VLLM_INSTALL_DEPS": "0",
             "FYP_VLLM_QUANTIZATION": "none",
             "FYP_LORA_RUNTIME_ENABLED": "false",
@@ -47,9 +72,9 @@ class ServingWrapperTests(unittest.TestCase):
             "VLLM_BIN": str(vllm_stub),
         }
 
-    def run_wrapper(self, **overrides):
+    def run_wrapper(self, *, trace=False, **overrides):
         return subprocess.run(
-            ["bash", str(SCRIPT)],
+            ["bash", *(["-x"] if trace else []), str(SCRIPT)],
             env={**self.environment, **overrides},
             capture_output=True,
             text=True,
@@ -100,6 +125,60 @@ class ServingWrapperTests(unittest.TestCase):
         result = self.run_wrapper(FEEDBACK_LORA_PATH=str(self.directory / "missing"))
         self.assertEqual(result.returncode, 1)
         self.assertIn("local adapter path does not exist", result.stderr)
+
+    def test_ssm_token_is_exported_to_vllm_without_logging_its_value(self):
+        token = "fixture-secret-from-ssm"
+        result = self.run_wrapper(
+            HF_TOKEN_SSM_PARAMETER="/fyp/serving/hf-token",
+            TEST_SSM_TOKEN=token,
+            TEST_EXPECT_HF_TOKEN=token,
+            HF_TOKEN="stale-direct-token",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = json.loads((self.directory / "ssm-request.json").read_text())
+        self.assertEqual(request[:2], ["ssm", "get-parameter"])
+        self.assertEqual(request[request.index("--name") + 1], "/fyp/serving/hf-token")
+        self.assertIn("--with-decryption", request)
+        self.assertEqual(request[request.index("--region") + 1], "us-east-1")
+        self.assertNotIn(token, result.stdout + result.stderr)
+
+    def test_ssm_token_is_not_leaked_under_shell_tracing(self):
+        token = "fixture-secret-hidden-from-trace"
+        result = self.run_wrapper(
+            trace=True,
+            HF_TOKEN_SSM_PARAMETER="/fyp/serving/hf-token",
+            TEST_SSM_TOKEN=token,
+            TEST_EXPECT_HF_TOKEN=token,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(token, result.stdout + result.stderr)
+
+    def test_ssm_failure_does_not_fall_back_to_a_stale_direct_token(self):
+        result = self.run_wrapper(
+            HF_TOKEN_SSM_PARAMETER="/fyp/serving/hf-token",
+            TEST_SSM_ERROR="1",
+            HF_TOKEN="stale-direct-token",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Cannot retrieve the serving HF token", result.stderr)
+        self.assertNotIn("Starting one vLLM", result.stdout)
+
+    def test_empty_ssm_tokens_are_rejected(self):
+        for token in ("", " \n ", "None", "null"):
+            with self.subTest(token=token):
+                result = self.run_wrapper(
+                    HF_TOKEN_SSM_PARAMETER="/fyp/serving/hf-token",
+                    TEST_SSM_TOKEN=token,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("SSM serving HF token is empty", result.stderr)
+
+    def test_direct_token_still_works_without_ssm_or_an_env_file(self):
+        result = self.run_wrapper(
+            HF_TOKEN="fixture-direct-token", TEST_EXPECT_HF_TOKEN="fixture-direct-token"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.directory / "ssm-request.json").exists())
 
 
 if __name__ == "__main__":

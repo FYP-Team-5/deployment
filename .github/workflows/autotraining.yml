@@ -8,6 +8,8 @@ on:
       - 'Script/**'
       - 'user-data.sh.tftpl'
       - 'main.tf'
+      - 'variables.tf'
+      - 'vllm-auth.tf'
       - 'autotraining-*.tf'
       - 'versions.tf'
       - '.terraform.lock.hcl'
@@ -18,6 +20,8 @@ on:
       - 'Script/**'
       - 'user-data.sh.tftpl'
       - 'main.tf'
+      - 'variables.tf'
+      - 'vllm-auth.tf'
       - 'autotraining-*.tf'
       - 'versions.tf'
       - '.terraform.lock.hcl'
@@ -52,7 +56,7 @@ jobs:
         run: python -m unittest discover -s Script/tests -v
       - uses: hashicorp/setup-terraform@v3
       - name: Check Terraform formatting
-        run: terraform fmt -check autotraining-data.tf autotraining-gpu.tf autotraining-control.tf autotraining-schedule.tf versions.tf
+        run: terraform fmt -check autotraining-data.tf autotraining-gpu.tf autotraining-control.tf autotraining-schedule.tf versions.tf variables.tf vllm-auth.tf
       - name: Terraform validation
         run: |
           terraform init -backend=false -input=false

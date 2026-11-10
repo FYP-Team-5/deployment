@@ -10,18 +10,42 @@ RUN_ID="$5"
 [[ "$RUN_ID" =~ ^[a-f0-9]{32}$ ]] || exit 2
 [[ "$VERSION_ID" =~ ^[a-f0-9-]{36}$ ]] || exit 2
 [[ "$CHECKSUM" =~ ^[a-f0-9]{64}$ ]] || exit 2
-WORK="/opt/fyp-autotraining"
+# Keep training state on the provisioned 200 GiB EBS root volume. The instance
+# store and its DLAMI mount may change or disappear when EC2 is stopped/resized.
+WORK="${FYP_TRAINING_WORK_DIRECTORY:-/opt/fyp-autotraining}"
+[[ "$WORK" == /* && "$WORK" != / ]] || { echo 'ERROR: Training workspace must be an absolute non-root path.' >&2; exit 2; }
 MODEL_COMMIT="8a2b94ec95754d875dc546461ef15dc2a279ce5a"
 export AWS_DEFAULT_REGION="$REGION"
 export PIP_DISABLE_PIP_VERSION_CHECK=1
-export HF_HOME="$WORK/hf-cache"
 export TOKENIZERS_PARALLELISM=false
 mkdir -p "$WORK"
 # Defend against duplicate SSM delivery or a redriven Launch state.
 exec 9>"$WORK/training.lock"
 flock -n 9 || { echo 'A training process already owns this GPU' >&2; exit 3; }
 [[ ! -f "$WORK/completed-$RUN_ID" ]] || exit 0
-trap 'rm -rf -- "$WORK/output-$RUN_ID"' EXIT
+
+# Budget for the base model, Python/CUDA packages, caches and checkpoints before
+# downloading anything large. The check uses actual free space, not disk names
+# or the instance type's advertised NVMe capacity.
+min_free_gib="${FYP_TRAINING_MIN_FREE_GIB:-60}"
+[[ "$min_free_gib" =~ ^[1-9][0-9]*$ ]] || { echo 'ERROR: FYP_TRAINING_MIN_FREE_GIB must be a positive integer.' >&2; exit 2; }
+available_kib="$(df -Pk "$WORK" | awk 'NR == 2 {print $4}')"
+[[ "$available_kib" =~ ^[0-9]+$ ]] || { echo 'ERROR: Cannot determine free workspace storage.' >&2; exit 1; }
+if (( available_kib < min_free_gib * 1024 * 1024 )); then
+    echo "ERROR: Training workspace $WORK needs at least $min_free_gib GiB free; available: $available_kib KiB. Check the EBS volume/filesystem or clean old caches." >&2
+    exit 1
+fi
+
+export HF_HOME="$WORK/hf-cache"
+export PIP_CACHE_DIR="$WORK/pip-cache"
+export UV_CACHE_DIR="$WORK/uv-cache"
+export UV_PYTHON_INSTALL_DIR="$WORK/uv-python"
+export XDG_CACHE_HOME="$WORK/cache"
+export TMPDIR="$WORK/tmp-$RUN_ID"
+mkdir -p "$HF_HOME" "$PIP_CACHE_DIR" "$UV_CACHE_DIR" "$UV_PYTHON_INSTALL_DIR" "$XDG_CACHE_HOME" "$TMPDIR"
+trap 'rm -rf -- "$WORK/output-$RUN_ID" "$TMPDIR"' EXIT
+echo "Training workspace (persistent EBS): $WORK"
+df -h "$WORK"
 # Emergency cost guard if a Step Functions execution is force-terminated.
 # EC2 is configured to stop rather than terminate on guest shutdown.
 if command -v systemd-run >/dev/null; then

@@ -80,6 +80,13 @@ private, provide Hugging Face read access to the vLLM service or set
 the access token. The grading candidate registry continues downloading its
 public adapters anonymously and does not deploy feedback adapters.
 
+Serving reads its HF token from the existing SSM SecureString named by
+`vllm_hf_token_parameter` (default `/fyp/serving/hf-token`). Terraform grants the
+serving role access and passes the parameter identity to systemd; the wrapper
+fetches the value at startup. No serving `.env` file is required. This is separate
+from the publisher's write token at `/fyp/training/hf-token`; the serving token
+only needs read access to both adapters. See the [serving setup](../README.md#grading-and-feedback-on-one-vllm-instance).
+
 ## Run Terraform and test
 
 From the deployment directory, with AWS credentials and GPU quota configured:
@@ -117,8 +124,10 @@ Run `terraform plan -out=enable.tfplan`, review it, then `terraform apply enable
 
 ## Training and recovery
 
+- **Instance:** a dedicated training EC2 instance inherits the serving instance type (`g5.xlarge` currently). Leave `autotraining_instance_type` unset or `null` to keep them matched; an explicit value overrides this default. Training remains isolated from the serving instance.
 - **QLoRA:** rank 48 / alpha 96, NF4 4-bit with double quantization, learning rate 5e-5, up to three epochs, batch 1 × accumulation 8, 4,096-token limit and an 80/10/10 question-group split. See [train.py](train.py) and [requirements.txt](requirements.txt).
 - **CSV:** uses the backend rubric schema. Partial-credit rows and missing desired answers are excluded and counted; at least ten compatible unique questions are required.
 - **Recovery:** training has a 12-hour SSM timeout. Terminal events and a 15-minute watchdog clean up failed/abandoned executions; the watchdog stops GPU runs older than 14 hours.
-- **Storage:** S3 retains unpublished artifacts and current run records. Published staging copies become eligible for expiry once older than 30 days; HF retains the published commit.
+- **Local storage:** the trainer retains its encrypted 200 GiB gp3 EBS root volume when using `g5.xlarge`. `/opt/fyp-autotraining` contains the dataset, model checkout, virtual environment, managed Python, HF/package caches and checkpoints. The run script checks for at least 60 GiB free before downloads (`FYP_TRAINING_MIN_FREE_GIB` can override this budget), prints the actual workspace filesystem, and cleans each run's temporary files and output directory on exit. Completed-run markers and caches remain on EBS across nightly stops. It does not depend on or format the DLAMI NVMe instance store. `FYP_TRAINING_WORK_DIRECTORY` can override the workspace path; use persistent storage if overriding it.
+- **Artifact storage:** S3 retains unpublished artifacts and current run records. Published staging copies become eligible for expiry once older than 30 days; HF retains the published commit.
 - **Status:** inspect Step Functions executions, CloudWatch training/coordinator logs, and **Instructor → Trained models**. Verify a live AWS/GPU/HF/vLLM run before enabling the schedule.

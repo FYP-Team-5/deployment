@@ -8,8 +8,8 @@ variable "autotraining_schedule_enabled" {
 }
 variable "autotraining_instance_type" {
   type        = string
-  default     = "g6e.xlarge"
-  description = "Dedicated GPU training EC2 instance type."
+  default     = null
+  description = "Optional dedicated training instance type override. Defaults to the serving EC2 instance type."
 }
 
 resource "aws_s3_bucket" "autotraining" {

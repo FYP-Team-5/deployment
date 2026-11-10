@@ -21,7 +21,7 @@ done
 [[ -n "$eip" ]] || { echo "ERROR: Elastic IP association not visible in EC2 metadata" >&2; exit 1; }
 
 apt-get update
-apt-get install -y python3-venv ca-certificates curl git openssl e2fsprogs util-linux
+apt-get install -y python3-venv ca-certificates curl git openssl e2fsprogs util-linux awscli
 
 # Start CloudWatch collection before the long Docker and vLLM setup.
 # Terraform manages the destination log groups and their 7-day retention.
@@ -225,6 +225,8 @@ Environment=FYP_VLLM_MAX_NUM_SEQS=1
 Environment=FYP_VLLM_MAX_LORA_RANK=64
 Environment=FYP_VLLM_MAX_LORAS=1
 Environment=FYP_VLLM_MAX_CPU_LORAS=4
+Environment=HF_TOKEN_SSM_PARAMETER=${hf_token_parameter}
+Environment=HF_TOKEN_SSM_REGION=${aws_region}
 Environment=HF_HOME=/mnt/llm-data/cache
 Environment=VENV_DIR=/mnt/llm-data/venv
 Environment=BOOTSTRAP_VENV=/mnt/llm-data/bootstrap

@@ -65,6 +65,8 @@ Important environment overrides:
   FEEDBACK_LORA_PATH            Feedback adapter directory or Hugging Face repo ID
   FEEDBACK_LORA_MODEL_NAME      Feedback alias matching backend LLM_FEEDBACK_MODEL
   HF_TOKEN                     Read token if a model repository is private
+  HF_TOKEN_SSM_PARAMETER       SSM SecureString path; fetched at startup if set
+  HF_TOKEN_SSM_REGION          SSM region (otherwise AWS CLI region defaults)
   FYP_VLLM_HOST                 Bind host (default: 0.0.0.0)
   FYP_VLLM_PORT                 API port (default: 8000)
   FYP_VLLM_MAX_MODEL_LEN        Context limit (default: 8192)
@@ -110,6 +112,32 @@ fi
 if [[ "$FEEDBACK_LORA_MODEL_NAME" == "$LORA_MODEL_NAME" || "$FEEDBACK_LORA_MODEL_NAME" == "$BASE_MODEL_NAME" || "$LORA_MODEL_NAME" == "$BASE_MODEL_NAME" ]]; then
     echo "ERROR: base, grading and feedback model aliases must be distinct." >&2
     exit 2
+fi
+
+# SSM lookup is authoritative when configured. Capture the value directly into
+# the process environment; never write it to disk, command arguments or logs.
+if [[ -n "${HF_TOKEN_SSM_PARAMETER:-}" ]]; then
+    token_trace_enabled=false
+    case "$-" in *x*) token_trace_enabled=true; set +x ;; esac
+    command -v aws >/dev/null || { echo "ERROR: AWS CLI is required for the SSM HF token lookup." >&2; exit 1; }
+    token_region="${HF_TOKEN_SSM_REGION:-${AWS_REGION:-${AWS_DEFAULT_REGION:-}}}"
+    token_args=(ssm get-parameter --name "$HF_TOKEN_SSM_PARAMETER" --with-decryption --query Parameter.Value --output text)
+    if [[ -n "$token_region" ]]; then
+        token_args+=(--region "$token_region")
+    fi
+    if ! HF_TOKEN="$(AWS_PAGER="" AWS_CLI_AUTO_PROMPT=off aws "${token_args[@]}")"; then
+        echo "ERROR: Cannot retrieve the serving HF token from SSM. Check the parameter, region and instance-role permissions." >&2
+        exit 1
+    fi
+    if [[ -z "${HF_TOKEN//[[:space:]]/}" || "$HF_TOKEN" == "None" || "$HF_TOKEN" == "null" ]]; then
+        echo "ERROR: The SSM serving HF token is empty." >&2
+        exit 1
+    fi
+    export HF_TOKEN
+    export HF_HUB_DISABLE_IMPLICIT_TOKEN=0
+    unset token_args token_region
+    if [[ "$token_trace_enabled" == true ]]; then set -x; fi
+    unset token_trace_enabled
 fi
 
 install_dependencies() {

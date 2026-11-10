@@ -125,8 +125,8 @@ resource "aws_cloudwatch_log_group" "vllm" {
 # The agent can publish only to these Terraform-managed log groups.
 data "aws_iam_policy_document" "cloudwatch_logs" {
   statement {
-    sid = "DescribeLogGroups"
-    actions = ["logs:DescribeLogGroups"]
+    sid       = "DescribeLogGroups"
+    actions   = ["logs:DescribeLogGroups"]
     resources = ["*"]
   }
 
@@ -172,11 +172,12 @@ resource "aws_instance" "llm" {
   }
 
   user_data_base64 = base64encode(templatefile("${path.module}/user-data.sh.tftpl", {
-    serve_script = base64gzip(file("${path.module}/Script/serve_qwen35_vllm.sh"))
+    serve_script         = base64gzip(file("${path.module}/Script/serve_qwen35_vllm.sh"))
     requirements         = base64gzip(file("${path.module}/Script/requirements-vllm.txt"))
     aws_region           = var.aws_region
     cloud_init_log_group = aws_cloudwatch_log_group.cloud_init.name
     vllm_log_group       = aws_cloudwatch_log_group.vllm.name
+    hf_token_parameter   = var.vllm_hf_token_parameter
   }))
   user_data_replace_on_change = true
 
@@ -187,7 +188,7 @@ resource "aws_instance" "llm" {
 
   tags = { Name = var.name }
 
-  depends_on = [aws_route_table_association.public, aws_iam_role_policy_attachment.ssm, aws_iam_role_policy.cloudwatch_logs]
+  depends_on = [aws_route_table_association.public, aws_iam_role_policy_attachment.ssm, aws_iam_role_policy.cloudwatch_logs, aws_iam_role_policy.vllm_hf_token]
 }
 
 resource "aws_eip_association" "llm" {
