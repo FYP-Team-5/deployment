@@ -5,6 +5,9 @@ on:
     branches: [feat/autotraining]
     paths:
       - 'autotraining/**'
+      - 'Script/**'
+      - 'user-data.sh.tftpl'
+      - 'main.tf'
       - 'autotraining-*.tf'
       - 'versions.tf'
       - '.terraform.lock.hcl'
@@ -12,6 +15,9 @@ on:
   pull_request:
     paths:
       - 'autotraining/**'
+      - 'Script/**'
+      - 'user-data.sh.tftpl'
+      - 'main.tf'
       - 'autotraining-*.tf'
       - 'versions.tf'
       - '.terraform.lock.hcl'
@@ -39,9 +45,11 @@ jobs:
           bash -n autotraining/publish.sh
           bash -n Script/serve_qwen35_vllm.sh
       - name: Python lint
-        run: ruff check autotraining
+        run: ruff check autotraining Script/tests
       - name: Unit tests
         run: python -m unittest discover -s autotraining/tests -v
+      - name: Serving wrapper tests
+        run: python -m unittest discover -s Script/tests -v
       - uses: hashicorp/setup-terraform@v3
       - name: Check Terraform formatting
         run: terraform fmt -check autotraining-data.tf autotraining-gpu.tf autotraining-control.tf autotraining-schedule.tf versions.tf

@@ -38,6 +38,9 @@ GPU_MEMORY_UTILIZATION="${FYP_VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
 # vLLM 0.29 accepts 1, 8, 16, 32, 64, ... but not 48.
 # The grading LoRA uses rank 48; reserve rank 64 to serve it.
 MAX_LORA_RANK="${FYP_VLLM_MAX_LORA_RANK:-64}"
+# Both adapters remain registered with a single GPU slot; requests select one.
+# Increase MAX_LORAS only when serving batches containing multiple adapters.
+MAX_LORAS="${FYP_VLLM_MAX_LORAS:-1}"
 MAX_CPU_LORAS="${FYP_VLLM_MAX_CPU_LORAS:-4}"
 QUANTIZATION="${FYP_VLLM_QUANTIZATION:-bitsandbytes}"
 ENFORCE_EAGER="${FYP_VLLM_ENFORCE_EAGER:-1}"
@@ -68,6 +71,8 @@ Important environment overrides:
   FYP_VLLM_GPU_MEMORY_UTILIZATION  GPU fraction (default: 0.90)
   FYP_VLLM_MAX_NUM_SEQS         Concurrent sequences (default: 1)
   FYP_VLLM_MAX_LORA_RANK        LoRA capacity (default: 64 for rank-48 adapter)
+  FYP_VLLM_MAX_LORAS            Adapters per GPU batch (default: 1)
+  FYP_VLLM_MAX_CPU_LORAS        Cached adapters (default: 4; at least 2)
   FYP_VLLM_DTYPE                Weight dtype (default: auto)
   FYP_VLLM_QUANTIZATION         bitsandbytes or none (default: bitsandbytes)
   FYP_VLLM_ENFORCE_EAGER        1 saves CUDA-graph memory; 0 enables graphs
@@ -92,6 +97,19 @@ EOF
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     usage
     exit 0
+fi
+
+if [[ ! "$MAX_LORAS" =~ ^[1-9][0-9]*$ || ! "$MAX_CPU_LORAS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: FYP_VLLM_MAX_LORAS and FYP_VLLM_MAX_CPU_LORAS must be positive integers." >&2
+    exit 2
+fi
+if (( MAX_CPU_LORAS < 2 || MAX_CPU_LORAS < MAX_LORAS )); then
+    echo "ERROR: CPU LoRA capacity must be at least 2 and at least FYP_VLLM_MAX_LORAS." >&2
+    exit 2
+fi
+if [[ "$FEEDBACK_LORA_MODEL_NAME" == "$LORA_MODEL_NAME" || "$FEEDBACK_LORA_MODEL_NAME" == "$BASE_MODEL_NAME" || "$LORA_MODEL_NAME" == "$BASE_MODEL_NAME" ]]; then
+    echo "ERROR: base, grading and feedback model aliases must be distinct." >&2
+    exit 2
 fi
 
 install_dependencies() {
@@ -160,11 +178,6 @@ for adapter_path in "$LORA_PATH" "$FEEDBACK_LORA_PATH"; do
     fi
 done
 
-if [[ "$FEEDBACK_LORA_MODEL_NAME" == "$LORA_MODEL_NAME" || "$FEEDBACK_LORA_MODEL_NAME" == "$BASE_MODEL_NAME" || "$LORA_MODEL_NAME" == "$BASE_MODEL_NAME" ]]; then
-    echo "ERROR: base, grading and feedback model aliases must be distinct." >&2
-    exit 2
-fi
-
 if [[ "$QUANTIZATION" != "none" && "$QUANTIZATION" != "bitsandbytes" ]]; then
     echo "ERROR: FYP_VLLM_QUANTIZATION must be 'none' or 'bitsandbytes'." >&2
     exit 2
@@ -195,6 +208,7 @@ vllm_args=(
     --enable-lora
     --lora-modules "${LORA_MODEL_NAME}=${LORA_PATH}" "${FEEDBACK_LORA_MODEL_NAME}=${FEEDBACK_LORA_PATH}"
     --max-lora-rank "$MAX_LORA_RANK"
+    --max-loras "$MAX_LORAS"
     --max-cpu-loras "$MAX_CPU_LORAS"
     --dtype "$DTYPE"
     --max-model-len "$MAX_MODEL_LEN"

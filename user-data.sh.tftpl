@@ -223,6 +223,8 @@ Environment=FYP_VLLM_MAX_MODEL_LEN=8192
 Environment=FYP_VLLM_GPU_MEMORY_UTILIZATION=0.90
 Environment=FYP_VLLM_MAX_NUM_SEQS=1
 Environment=FYP_VLLM_MAX_LORA_RANK=64
+Environment=FYP_VLLM_MAX_LORAS=1
+Environment=FYP_VLLM_MAX_CPU_LORAS=4
 Environment=HF_HOME=/mnt/llm-data/cache
 Environment=VENV_DIR=/mnt/llm-data/venv
 Environment=BOOTSTRAP_VENV=/mnt/llm-data/bootstrap
@@ -230,6 +232,8 @@ Environment=UV_CACHE_DIR=/mnt/llm-data/uv-cache
 Environment=UV_PYTHON_INSTALL_DIR=/mnt/llm-data/uv-python
 Environment=PIP_CACHE_DIR=/mnt/llm-data/pip-cache
 Environment=XDG_CACHE_HOME=/mnt/llm-data/xdg-cache
+# Optional host configuration and HF read token; keep credentials outside user data.
+EnvironmentFile=-/etc/qwen-vllm.env
 ExecStart=/opt/qwen-vllm/Script/serve_qwen35_vllm.sh
 Restart=on-failure
 RestartSec=30
