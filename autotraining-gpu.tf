@@ -1,8 +1,15 @@
-# Separate GPU instance: no inbound ports; SSM manages all commands.
+# Separate GPU instance: EC2 Instance Connect SSH; SSM runs training commands.
 resource "aws_security_group" "autotraining" {
   name_prefix = "${var.name}-trainer-"
   description = "Private inbound; outbound for models, packages and SSM"
   vpc_id      = aws_vpc.llm.id
+  ingress {
+    description     = "SSH via EC2 Instance Connect browser"
+    from_port       = 22
+    to_port         = 22
+    protocol        = "tcp"
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.instance_connect.id]
+  }
   egress {
     from_port   = 0
     to_port     = 0
@@ -53,9 +60,14 @@ resource "aws_iam_role_policy" "autotraining" {
         Resource = ["${aws_s3_bucket.autotraining.arn}/candidates/*"]
       },
       {
+        Effect   = "Allow"
+        Action   = ["logs:DescribeLogGroups"]
+        Resource = "*"
+      },
+      {
         Effect = "Allow"
         Action = [
-          "logs:CreateLogStream", "logs:DescribeLogStreams",
+          "logs:CreateLogGroup", "logs:CreateLogStream", "logs:DescribeLogStreams",
           "logs:PutLogEvents"
         ]
         Resource = [
