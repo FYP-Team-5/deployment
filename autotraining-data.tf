@@ -11,9 +11,16 @@ variable "autotraining_instance_type" {
   default     = null
   description = "Optional dedicated training instance type override. Defaults to the serving EC2 instance type."
 }
+variable "autotraining_force_destroy" {
+  type        = bool
+  default     = false
+  nullable    = false
+  description = "Allow Terraform to permanently delete all training-bucket objects, versions and delete markers when destroying the bucket. Enable only for an intentional teardown."
+}
 
 resource "aws_s3_bucket" "autotraining" {
-  bucket = "${var.name}-training-${data.aws_caller_identity.autotraining.account_id}"
+  bucket        = "${var.name}-training-${data.aws_caller_identity.autotraining.account_id}"
+  force_destroy = var.autotraining_force_destroy
 }
 resource "aws_s3_bucket_public_access_block" "autotraining" {
   bucket                  = aws_s3_bucket.autotraining.id

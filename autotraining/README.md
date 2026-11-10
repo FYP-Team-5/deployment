@@ -134,3 +134,30 @@ Run `terraform plan -out=enable.tfplan`, review it, then `terraform apply enable
 - **Artifact storage:** S3 retains unpublished artifacts and current run records. Published staging copies become eligible for expiry once older than 30 days; HF retains the published commit.
 - **Status:** inspect Step Functions executions, CloudWatch training/coordinator logs, and **Instructor → Trained models**. Verify a live AWS/GPU/HF/vLLM run before enabling the schedule.
 - **Training logs:** `/fyp/<name>/training` receives SSM command stdout/stderr. The trainer role needs `logs:DescribeLogGroups` plus group-scoped creation/stream/write permissions for SSM to initialise forwarding. Inspect `/var/log/amazon/ssm/errors.log` if a command is running but no streams appear; EC2 health checks alone do not verify log delivery.
+
+## Teardown
+
+The training bucket is versioned and defaults to `autotraining_force_destroy = false`.
+S3 requires every object version and delete marker to be removed before bucket
+deletion. `aws s3 rm --recursive` or `aws s3 rb --force` does not empty old versions.
+Retained versions continue to incur storage charges.
+
+To permanently remove datasets, candidate artifacts, receipts, scripts and run
+history during an intentional teardown, first record the opt-in on the bucket:
+
+```bash
+# From deployment/. Review the bucket-only change before accepting it.
+terraform apply -target=aws_s3_bucket.autotraining \
+  -var='autotraining_force_destroy=true'
+terraform destroy -var='autotraining_force_destroy=true'
+```
+
+The targeted apply is a recovery step when a destroy has already removed other
+resources and left only the nonempty bucket. It updates the bucket's Terraform
+setting without recreating the training stack. For a planned teardown of an
+intact stack, stop training and apply the opt-in with a reviewed normal plan
+before destroying. Setting the flag only on `terraform destroy` does not record
+it on the existing bucket first.
+
+These commands permanently delete every bucket version; copy anything needed
+before running them. Keep the default `false` for deployments that retain data.
