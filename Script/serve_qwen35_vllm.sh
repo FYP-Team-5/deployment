@@ -2,8 +2,8 @@
 
 set -Eeuo pipefail
 
-# Both model repositories are public; serving does not need HF credentials.
-export HF_HUB_DISABLE_IMPLICIT_TOKEN=1
+# A private feedback repository needs HF_TOKEN/cached login, or a local adapter path.
+export HF_HUB_DISABLE_IMPLICIT_TOKEN="${HF_HUB_DISABLE_IMPLICIT_TOKEN:-0}"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-${SCRIPT_DIR}/requirements-vllm.txt}"
@@ -11,12 +11,14 @@ VENV_DIR="${VENV_DIR:-${SCRIPT_DIR}/.venv}"
 BOOTSTRAP_VENV="${BOOTSTRAP_VENV:-${SCRIPT_DIR}/.bootstrap}"
 INSTALL_DEPS="${FYP_VLLM_INSTALL_DEPS:-1}"
 
-# Both API model names share one base-model process. Selecting LORA_MODEL_NAME
-# activates the adapter; selecting BASE_MODEL_NAME leaves it disabled.
+# All aliases share one base-model process. Each LoRA name selects its adapter;
+# selecting BASE_MODEL_NAME leaves adapters disabled.
 BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3.5-9B}"
 BASE_MODEL_NAME="${BASE_MODEL_NAME:-qwen35-9b-base}"
 LORA_MODEL_NAME="${LORA_MODEL_NAME:-qwen35-9b-grading-qlora}"
 LORA_PATH="${LORA_PATH:-SmuFypTeam5/GradingQlora}"
+FEEDBACK_LORA_MODEL_NAME="${FEEDBACK_LORA_MODEL_NAME:-qwen35-9b-feedback-qlora}"
+FEEDBACK_LORA_PATH="${FEEDBACK_LORA_PATH:-SmuFypTeam5/feedback}"
 # Opt-in on the private serving host; backend deploys only approved commit-pinned adapters.
 if [[ "${FYP_LORA_RUNTIME_ENABLED:-false}" == "true" ]]; then
     export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
@@ -45,7 +47,7 @@ VLLM_BIN="${VLLM_BIN:-${VENV_DIR}/bin/vllm}"
 
 usage() {
     cat <<'EOF'
-Serve Qwen3.5-9B base and its grading LoRA through one vLLM server.
+Serve Qwen3.5-9B base, grading LoRA and feedback LoRA through one vLLM server.
 
 Usage:
   ./serve_qwen35_vllm.sh [extra vllm serve arguments]
@@ -53,9 +55,13 @@ Usage:
 API model names:
   qwen35-9b-base             Base model (adapter disabled)
   qwen35-9b-grading-qlora    Base model with grading adapter enabled
+  qwen35-9b-feedback-qlora   Base model with feedback adapter enabled
 
 Important environment overrides:
   LORA_PATH                     Local adapter directory or Hugging Face repo ID
+  FEEDBACK_LORA_PATH            Feedback adapter directory or Hugging Face repo ID
+  FEEDBACK_LORA_MODEL_NAME      Feedback alias matching backend LLM_FEEDBACK_MODEL
+  HF_TOKEN                     Read token if a model repository is private
   FYP_VLLM_HOST                 Bind host (default: 0.0.0.0)
   FYP_VLLM_PORT                 API port (default: 8000)
   FYP_VLLM_MAX_MODEL_LEN        Context limit (default: 8192)
@@ -75,11 +81,11 @@ Examples:
   LORA_PATH=SmuFypTeam5/GradingQlora ./serve_qwen35_vllm.sh
   FYP_VLLM_QUANTIZATION=none ./serve_qwen35_vllm.sh  # Opt out of 4-bit loading
 
-After startup, list both models with:
+After startup, list all model aliases with:
   curl http://127.0.0.1:8000/v1/models
 
-Use the model field in an OpenAI-compatible request to select either variant.
-Thinking is disabled by default for both variants.
+Use the model field in an OpenAI-compatible request to select a variant.
+Thinking is disabled by default for all variants.
 EOF
 }
 
@@ -142,14 +148,21 @@ if ! "$PYTHON_BIN" -c 'import torch; raise SystemExit(0 if torch.cuda.is_availab
     exit 1
 fi
 
-if [[ -d "$LORA_PATH" ]]; then
-    if [[ ! -f "$LORA_PATH/adapter_config.json" || ! -f "$LORA_PATH/adapter_model.safetensors" ]]; then
-        echo "ERROR: local adapter directory is incomplete: $LORA_PATH" >&2
+for adapter_path in "$LORA_PATH" "$FEEDBACK_LORA_PATH"; do
+    if [[ -d "$adapter_path" ]]; then
+        if [[ ! -f "$adapter_path/adapter_config.json" || ! -f "$adapter_path/adapter_model.safetensors" ]]; then
+            echo "ERROR: local adapter directory is incomplete: $adapter_path" >&2
+            exit 1
+        fi
+    elif [[ "$adapter_path" == /* || "$adapter_path" == ./* || "$adapter_path" == ../* ]]; then
+        echo "ERROR: local adapter path does not exist: $adapter_path" >&2
         exit 1
     fi
-elif [[ "$LORA_PATH" == /* || "$LORA_PATH" == ./* || "$LORA_PATH" == ../* ]]; then
-    echo "ERROR: local adapter path does not exist: $LORA_PATH" >&2
-    exit 1
+done
+
+if [[ "$FEEDBACK_LORA_MODEL_NAME" == "$LORA_MODEL_NAME" || "$FEEDBACK_LORA_MODEL_NAME" == "$BASE_MODEL_NAME" || "$LORA_MODEL_NAME" == "$BASE_MODEL_NAME" ]]; then
+    echo "ERROR: base, grading and feedback model aliases must be distinct." >&2
+    exit 2
 fi
 
 if [[ "$QUANTIZATION" != "none" && "$QUANTIZATION" != "bitsandbytes" ]]; then
@@ -180,7 +193,7 @@ vllm_args=(
     --served-model-name "$BASE_MODEL_NAME"
     --default-chat-template-kwargs '{"enable_thinking": false}'
     --enable-lora
-    --lora-modules "${LORA_MODEL_NAME}=${LORA_PATH}"
+    --lora-modules "${LORA_MODEL_NAME}=${LORA_PATH}" "${FEEDBACK_LORA_MODEL_NAME}=${FEEDBACK_LORA_PATH}"
     --max-lora-rank "$MAX_LORA_RANK"
     --max-cpu-loras "$MAX_CPU_LORAS"
     --dtype "$DTYPE"
@@ -202,9 +215,10 @@ if [[ "$QUANTIZATION" == "bitsandbytes" ]]; then
     vllm_args+=(--quantization bitsandbytes)
 fi
 
-echo "Starting one vLLM server with two selectable models:"
+echo "Starting one vLLM server with three selectable model aliases:"
 echo "  Base:    $BASE_MODEL_NAME ($BASE_MODEL)"
 echo "  Adapter: $LORA_MODEL_NAME ($LORA_PATH)"
+echo "  Feedback: $FEEDBACK_LORA_MODEL_NAME ($FEEDBACK_LORA_PATH)"
 echo "  Quantization: $QUANTIZATION"
 echo "  FlashInfer sampler: $USE_FLASHINFER_SAMPLER"
 echo "  API:     http://${HOST}:${PORT}/v1"

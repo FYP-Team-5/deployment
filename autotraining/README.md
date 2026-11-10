@@ -54,6 +54,7 @@ Candidates include dataset identity, configuration, baseline/candidate metrics a
 
    ```dotenv
    TRAINING_CALLBACK_TOKEN=<same callback credential>
+   TRAINING_STATE_MACHINE_ARN=<autotraining_state_machine_arn Terraform output>
    TRAINING_HF_REPO=SmuFypTeam5/GradingQlora
    MODEL_ADAPTER_DIRECTORY=/mnt/llm-data/adapters
    ```
@@ -69,6 +70,16 @@ Candidates include dataset identity, configuration, baseline/candidate metrics a
 
 Keep vLLM port 8000 private. The adapter directory must use the same path in the backend container and serving host.
 
+The serving wrapper also loads `SmuFypTeam5/feedback` as
+`qwen35-9b-feedback-qlora`. Backend `LLM_FEEDBACK_MODEL` must match this alias;
+`LLM_GRADING_CONTRACT=criteria_array_v1` selects the grading adapter's binary
+output format. Feedback uses the reference training prompt with both `[MET]`
+and `[NOT MET]` points, and returns plain text. If the feedback repository is
+private, provide Hugging Face read access to the vLLM service or set
+`FEEDBACK_LORA_PATH` to an already downloaded adapter directory. Never commit
+the access token. The grading candidate registry continues downloading its
+public adapters anonymously and does not deploy feedback adapters.
+
 ## Run Terraform and test
 
 From the deployment directory, with AWS credentials and GPU quota configured:
@@ -83,7 +94,11 @@ terraform apply autotraining.tfplan
 
 Review the plan before applying; avoid replacing the serving instance or applying during training. The schedule remains disabled.
 
-Start one manual run:
+After applying, set backend `TRAINING_STATE_MACHINE_ARN` to `terraform output -raw autotraining_state_machine_arn`, then rebuild/restart the backend and updated frontend. The backend uses the serving EC2 instance role; Terraform grants `states:StartExecution` only for this workflow and sets the IMDSv2 response hop limit to 2 so the Docker container can obtain role credentials. No AWS access keys belong in the frontend or backend `.env`.
+
+Sign in as an instructor, open **Trained models**, and select **Start training** to request one run on the latest ready dataset. The page shows acceptance or an error and refreshes candidates automatically. A request can be skipped by the workflow if no new ready dataset is available or the GPU is busy. Training does not activate the resulting model; review and deploy the candidate separately. Failed browser requests retain their request ID so retries cannot start the same request twice.
+
+Alternatively, start one manual run from the CLI:
 
 ```bash
 aws stepfunctions start-execution \

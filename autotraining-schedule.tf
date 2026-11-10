@@ -31,6 +31,20 @@ resource "aws_sfn_state_machine" "autotraining" {
   depends_on = [aws_iam_role_policy.autotraining_stepfunctions]
 }
 
+# The instructor API can start this workflow using the serving instance role.
+resource "aws_iam_role_policy" "autotraining_backend_start" {
+  name = "${var.name}-start-manual-training"
+  role = aws_iam_role.llm.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["states:StartExecution"]
+      Resource = aws_sfn_state_machine.autotraining.arn
+    }]
+  })
+}
+
 resource "aws_iam_role" "autotraining_scheduler" {
   name_prefix = "${var.name}-training-scheduler-"
   assume_role_policy = jsonencode({

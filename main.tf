@@ -181,7 +181,8 @@ resource "aws_instance" "llm" {
   user_data_replace_on_change = true
 
   metadata_options {
-    http_tokens = "required"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2 # Allow the backend Docker container to use the instance role.
   }
 
   tags = { Name = var.name }
