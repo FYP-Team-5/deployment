@@ -1,0 +1,63 @@
+name: Autotraining static checks
+
+on:
+  push:
+    branches: [feat/autotraining]
+    paths:
+      - 'autotraining/**'
+      - 'Script/**'
+      - 'user-data.sh.tftpl'
+      - 'main.tf'
+      - 'variables.tf'
+      - 'vllm-auth.tf'
+      - 'autotraining-*.tf'
+      - 'versions.tf'
+      - '.terraform.lock.hcl'
+      - '.github/workflows/autotraining.yml'
+  pull_request:
+    paths:
+      - 'autotraining/**'
+      - 'Script/**'
+      - 'user-data.sh.tftpl'
+      - 'main.tf'
+      - 'variables.tf'
+      - 'vllm-auth.tf'
+      - 'autotraining-*.tf'
+      - 'versions.tf'
+      - '.terraform.lock.hcl'
+      - '.github/workflows/autotraining.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install lightweight test dependencies
+        run: python -m pip install 'boto3>=1.35,<2' 'ruff==0.16.4'
+      - name: Check Python syntax
+        run: python -m compileall -q autotraining
+      - name: Check shell scripts
+        run: |
+          bash -n autotraining/export_backend.sh
+          bash -n autotraining/run_training.sh
+          bash -n autotraining/publish.sh
+          bash -n Script/serve_qwen35_vllm.sh
+      - name: Python lint
+        run: ruff check autotraining Script/tests
+      - name: Unit tests
+        run: python -m unittest discover -s autotraining/tests -v
+      - name: Serving wrapper tests
+        run: python -m unittest discover -s Script/tests -v
+      - uses: hashicorp/setup-terraform@v3
+      - name: Check Terraform formatting
+        run: terraform fmt -check autotraining-data.tf autotraining-gpu.tf autotraining-control.tf autotraining-schedule.tf versions.tf variables.tf vllm-auth.tf
+      - name: Terraform validation
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate -no-color

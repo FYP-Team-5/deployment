@@ -1,0 +1,464 @@
+{
+  "StartAt": "Initialize",
+  "TimeoutSeconds": 68400,
+  "States": {
+    "Prepare": {
+      "Type": "Task",
+      "Resource": "${lambda_arn}",
+      "Parameters": {
+        "action": "prepare",
+        "execution_id.$": "$.execution_id",
+        "command_id.$": "$.export.command_id"
+      },
+      "ResultPath": "$.job",
+      "Next": "ExportReady",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "FailAndStop"
+        }
+      ],
+      "TimeoutSeconds": 140
+    },
+    "ShouldTrain": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.job.train",
+          "BooleanEquals": true,
+          "Next": "StartGPU"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.job.publish",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.job.publish",
+              "BooleanEquals": true
+            }
+          ],
+          "Next": "Publish"
+        }
+      ],
+      "Default": "Skipped"
+    },
+    "Skipped": {
+      "Type": "Succeed"
+    },
+    "StartGPU": {
+      "Type": "Task",
+      "Resource": "${lambda_arn}",
+      "Parameters": {
+        "action": "start",
+        "job.$": "$.job"
+      },
+      "ResultPath": "$.start",
+      "Next": "Init",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "FailAndStop"
+        }
+      ],
+      "TimeoutSeconds": 140,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ]
+    },
+    "Init": {
+      "Type": "Pass",
+      "Result": 0,
+      "ResultPath": "$.attempt",
+      "Next": "WaitBoot"
+    },
+    "WaitBoot": {
+      "Type": "Wait",
+      "Seconds": 45,
+      "Next": "Launch"
+    },
+    "Launch": {
+      "Type": "Task",
+      "Resource": "${lambda_arn}",
+      "Parameters": {
+        "action": "launch",
+        "job.$": "$.job",
+        "attempt.$": "$.attempt"
+      },
+      "ResultPath": "$.launch",
+      "Next": "Ready",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "FailAndStop"
+        }
+      ],
+      "TimeoutSeconds": 140
+    },
+    "Ready": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.launch.ready",
+          "BooleanEquals": true,
+          "Next": "WaitTraining"
+        },
+        {
+          "Variable": "$.launch.attempt",
+          "NumericGreaterThanEquals": 20,
+          "Next": "BootTimeout"
+        }
+      ],
+      "Default": "NextAttempt"
+    },
+    "NextAttempt": {
+      "Type": "Pass",
+      "Parameters": {
+        "job.$": "$.job",
+        "attempt.$": "$.launch.attempt",
+        "execution_id.$": "$.execution_id"
+      },
+      "Next": "WaitBoot"
+    },
+    "WaitTraining": {
+      "Type": "Wait",
+      "Seconds": 90,
+      "Next": "Poll"
+    },
+    "Poll": {
+      "Type": "Task",
+      "Resource": "${lambda_arn}",
+      "Parameters": {
+        "action": "poll",
+        "command_id.$": "$.launch.command_id",
+        "job.$": "$.job"
+      },
+      "ResultPath": "$.poll",
+      "Next": "Finished",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "FailAndStop"
+        }
+      ],
+      "TimeoutSeconds": 140,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ]
+    },
+    "Finished": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.poll.done",
+          "BooleanEquals": true,
+          "Next": "Complete"
+        }
+      ],
+      "Default": "WaitTraining"
+    },
+    "Complete": {
+      "Type": "Task",
+      "Resource": "${lambda_arn}",
+      "Parameters": {
+        "action": "complete",
+        "job.$": "$.job"
+      },
+      "ResultPath": "$.candidate",
+      "Next": "StopGPU",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "FailAndStop"
+        }
+      ],
+      "TimeoutSeconds": 140,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ]
+    },
+    "StopGPU": {
+      "Type": "Task",
+      "Resource": "${lambda_arn}",
+      "Parameters": {
+        "action": "stop",
+        "execution_id.$": "$.execution_id"
+      },
+      "ResultPath": "$.result",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "FailAndStop"
+        }
+      ],
+      "TimeoutSeconds": 140,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Stopped"
+    },
+    "FailAndStop": {
+      "Type": "Task",
+      "Resource": "${lambda_arn}",
+      "Parameters": {
+        "action": "fail",
+        "execution_id.$": "$.execution_id",
+        "error.$": "$.error"
+      },
+      "ResultPath": "$.result",
+      "Next": "FailureStopped",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Failed"
+        }
+      ],
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 10,
+          "MaxAttempts": 4,
+          "BackoffRate": 2
+        }
+      ],
+      "TimeoutSeconds": 140
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "NightlyTrainingFailed"
+    },
+    "Initialize": {
+      "Type": "Pass",
+      "Parameters": {
+        "execution_id.$": "$$.Execution.Id"
+      },
+      "Next": "Snapshot"
+    },
+    "BootTimeout": {
+      "Type": "Pass",
+      "Result": {
+        "Error": "SSMReadinessTimeout"
+      },
+      "ResultPath": "$.error",
+      "Next": "FailAndStop"
+    },
+    "Snapshot": {
+      "Type": "Task",
+      "Resource": "${lambda_arn}",
+      "Parameters": {
+        "action": "snapshot"
+      },
+      "ResultPath": "$.export",
+      "Next": "InitExport",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "FailAndStop"
+        }
+      ],
+      "TimeoutSeconds": 140
+    },
+    "InitExport": {
+      "Type": "Pass",
+      "Result": 0,
+      "ResultPath": "$.export_attempt",
+      "Next": "WaitExport"
+    },
+    "WaitExport": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "Prepare"
+    },
+    "ExportReady": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.job.ready",
+          "BooleanEquals": true,
+          "Next": "ShouldTrain"
+        },
+        {
+          "Variable": "$.export_attempt",
+          "NumericGreaterThanEquals": 32,
+          "Next": "ExportTimeout"
+        }
+      ],
+      "Default": "NextExportAttempt"
+    },
+    "NextExportAttempt": {
+      "Type": "Pass",
+      "Parameters": {
+        "execution_id.$": "$.execution_id",
+        "export.$": "$.export",
+        "export_attempt.$": "States.MathAdd($.export_attempt, 1)"
+      },
+      "Next": "WaitExport"
+    },
+    "ExportTimeout": {
+      "Type": "Pass",
+      "Result": {
+        "Error": "DatasetExportTimeout"
+      },
+      "ResultPath": "$.error",
+      "Next": "FailAndStop"
+    },
+    "Stopped": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.result.stopped",
+          "BooleanEquals": true,
+          "Next": "Publish"
+        }
+      ],
+      "Default": "WaitStop"
+    },
+    "WaitStop": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "StopGPU"
+    },
+    "FailureStopped": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.result.stopped",
+          "BooleanEquals": true,
+          "Next": "Failed"
+        }
+      ],
+      "Default": "WaitFailureStop"
+    },
+    "WaitFailureStop": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "FailAndStop"
+    },
+    "Publish": {
+      "Type": "Task",
+      "Resource": "${lambda_arn}",
+      "Parameters": {
+        "action": "publish",
+        "job.$": "$.job"
+      },
+      "ResultPath": "$.publication",
+      "Next": "WaitPublication",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "FailAndStop"
+        }
+      ],
+      "TimeoutSeconds": 140
+    },
+    "PublicationStatus": {
+      "Type": "Task",
+      "Resource": "${lambda_arn}",
+      "Parameters": {
+        "action": "publication_status",
+        "job.$": "$.job",
+        "command_id.$": "$.publication.command_id"
+      },
+      "ResultPath": "$.published",
+      "Next": "PublicationDone",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "FailAndStop"
+        }
+      ],
+      "TimeoutSeconds": 140
+    },
+    "WaitPublication": {
+      "Type": "Wait",
+      "Seconds": 30,
+      "Next": "PublicationStatus"
+    },
+    "PublicationDone": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.published.done",
+          "BooleanEquals": true,
+          "Next": "Succeeded"
+        }
+      ],
+      "Default": "WaitPublication"
+    },
+    "Succeeded": {
+      "Type": "Succeed"
+    }
+  }
+}

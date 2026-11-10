@@ -2,18 +2,30 @@
 
 set -Eeuo pipefail
 
+# A private feedback repository needs HF_TOKEN/cached login, or a local adapter path.
+export HF_HUB_DISABLE_IMPLICIT_TOKEN="${HF_HUB_DISABLE_IMPLICIT_TOKEN:-0}"
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-${SCRIPT_DIR}/requirements-vllm.txt}"
 VENV_DIR="${VENV_DIR:-${SCRIPT_DIR}/.venv}"
 BOOTSTRAP_VENV="${BOOTSTRAP_VENV:-${SCRIPT_DIR}/.bootstrap}"
 INSTALL_DEPS="${FYP_VLLM_INSTALL_DEPS:-1}"
 
-# Both API model names share one base-model process. Selecting LORA_MODEL_NAME
-# activates the adapter; selecting BASE_MODEL_NAME leaves it disabled.
+# All aliases share one base-model process. Each LoRA name selects its adapter;
+# selecting BASE_MODEL_NAME leaves adapters disabled.
 BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3.5-9B}"
 BASE_MODEL_NAME="${BASE_MODEL_NAME:-qwen35-9b-base}"
 LORA_MODEL_NAME="${LORA_MODEL_NAME:-qwen35-9b-grading-qlora}"
 LORA_PATH="${LORA_PATH:-SmuFypTeam5/GradingQlora}"
+FEEDBACK_LORA_MODEL_NAME="${FEEDBACK_LORA_MODEL_NAME:-qwen35-9b-feedback-qlora}"
+FEEDBACK_LORA_PATH="${FEEDBACK_LORA_PATH:-SmuFypTeam5/feedback}"
+# Opt-in on the private serving host; backend deploys only approved commit-pinned adapters.
+if [[ "${FYP_LORA_RUNTIME_ENABLED:-false}" == "true" ]]; then
+    export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+    export VLLM_PLUGINS=lora_filesystem_resolver
+    export VLLM_LORA_RESOLVER_CACHE_DIR="${FYP_LORA_ADAPTER_DIRECTORY:-/mnt/llm-data/adapters}"
+    mkdir -p "$VLLM_LORA_RESOLVER_CACHE_DIR"
+fi
 
 # Use FYP_VLLM_* for wrapper CLI options: vLLM itself reserves the VLLM_* prefix
 # and logs warnings for unknown entries. VLLM_USE_FLASHINFER_SAMPLER is a real vLLM env var.
@@ -26,6 +38,10 @@ GPU_MEMORY_UTILIZATION="${FYP_VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
 # vLLM 0.29 accepts 1, 8, 16, 32, 64, ... but not 48.
 # The grading LoRA uses rank 48; reserve rank 64 to serve it.
 MAX_LORA_RANK="${FYP_VLLM_MAX_LORA_RANK:-64}"
+# Both adapters remain registered with a single GPU slot; requests select one.
+# Increase MAX_LORAS only when serving batches containing multiple adapters.
+MAX_LORAS="${FYP_VLLM_MAX_LORAS:-1}"
+MAX_CPU_LORAS="${FYP_VLLM_MAX_CPU_LORAS:-4}"
 QUANTIZATION="${FYP_VLLM_QUANTIZATION:-bitsandbytes}"
 ENFORCE_EAGER="${FYP_VLLM_ENFORCE_EAGER:-1}"
 USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
@@ -34,7 +50,7 @@ VLLM_BIN="${VLLM_BIN:-${VENV_DIR}/bin/vllm}"
 
 usage() {
     cat <<'EOF'
-Serve Qwen3.5-9B base and its grading LoRA through one vLLM server.
+Serve Qwen3.5-9B base, grading LoRA and feedback LoRA through one vLLM server.
 
 Usage:
   ./serve_qwen35_vllm.sh [extra vllm serve arguments]
@@ -42,15 +58,23 @@ Usage:
 API model names:
   qwen35-9b-base             Base model (adapter disabled)
   qwen35-9b-grading-qlora    Base model with grading adapter enabled
+  qwen35-9b-feedback-qlora   Base model with feedback adapter enabled
 
 Important environment overrides:
   LORA_PATH                     Local adapter directory or Hugging Face repo ID
+  FEEDBACK_LORA_PATH            Feedback adapter directory or Hugging Face repo ID
+  FEEDBACK_LORA_MODEL_NAME      Feedback alias matching backend LLM_FEEDBACK_MODEL
+  HF_TOKEN                     Read token if a model repository is private
+  HF_TOKEN_SSM_PARAMETER       SSM SecureString path; fetched at startup if set
+  HF_TOKEN_SSM_REGION          SSM region (otherwise AWS CLI region defaults)
   FYP_VLLM_HOST                 Bind host (default: 0.0.0.0)
   FYP_VLLM_PORT                 API port (default: 8000)
   FYP_VLLM_MAX_MODEL_LEN        Context limit (default: 8192)
   FYP_VLLM_GPU_MEMORY_UTILIZATION  GPU fraction (default: 0.90)
   FYP_VLLM_MAX_NUM_SEQS         Concurrent sequences (default: 1)
   FYP_VLLM_MAX_LORA_RANK        LoRA capacity (default: 64 for rank-48 adapter)
+  FYP_VLLM_MAX_LORAS            Adapters per GPU batch (default: 1)
+  FYP_VLLM_MAX_CPU_LORAS        Cached adapters (default: 4; at least 2)
   FYP_VLLM_DTYPE                Weight dtype (default: auto)
   FYP_VLLM_QUANTIZATION         bitsandbytes or none (default: bitsandbytes)
   FYP_VLLM_ENFORCE_EAGER        1 saves CUDA-graph memory; 0 enables graphs
@@ -64,17 +88,60 @@ Examples:
   LORA_PATH=SmuFypTeam5/GradingQlora ./serve_qwen35_vllm.sh
   FYP_VLLM_QUANTIZATION=none ./serve_qwen35_vllm.sh  # Opt out of 4-bit loading
 
-After startup, list both models with:
+After startup, list all model aliases with:
   curl http://127.0.0.1:8000/v1/models
 
-Use the model field in an OpenAI-compatible request to select either variant.
-Thinking is disabled by default for both variants.
+Use the model field in an OpenAI-compatible request to select a variant.
+Thinking is disabled by default for all variants.
 EOF
 }
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     usage
     exit 0
+fi
+
+if [[ ! "$MAX_LORAS" =~ ^[1-9][0-9]*$ || ! "$MAX_CPU_LORAS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: FYP_VLLM_MAX_LORAS and FYP_VLLM_MAX_CPU_LORAS must be positive integers." >&2
+    exit 2
+fi
+if (( MAX_CPU_LORAS < 2 || MAX_CPU_LORAS < MAX_LORAS )); then
+    echo "ERROR: CPU LoRA capacity must be at least 2 and at least FYP_VLLM_MAX_LORAS." >&2
+    exit 2
+fi
+if [[ "$FEEDBACK_LORA_MODEL_NAME" == "$LORA_MODEL_NAME" || "$FEEDBACK_LORA_MODEL_NAME" == "$BASE_MODEL_NAME" || "$LORA_MODEL_NAME" == "$BASE_MODEL_NAME" ]]; then
+    echo "ERROR: base, grading and feedback model aliases must be distinct." >&2
+    exit 2
+fi
+
+# SSM lookup is authoritative when configured. Capture the value directly into
+# the process environment; never write it to disk, command arguments or logs.
+if [[ -n "${HF_TOKEN_SSM_PARAMETER:-}" ]]; then
+    token_trace_enabled=false
+    case "$-" in *x*) token_trace_enabled=true; set +x ;; esac
+    command -v aws >/dev/null || { echo "ERROR: AWS CLI is required for the SSM HF token lookup." >&2; exit 1; }
+    token_region="${HF_TOKEN_SSM_REGION:-${AWS_REGION:-${AWS_DEFAULT_REGION:-}}}"
+    token_args=(ssm get-parameter --name "$HF_TOKEN_SSM_PARAMETER" --with-decryption --query Parameter.Value --output text)
+    if [[ -n "$token_region" ]]; then
+        token_args+=(--region "$token_region")
+    fi
+    if HF_TOKEN="$(AWS_PAGER="" AWS_CLI_AUTO_PROMPT=off aws "${token_args[@]}")"; then
+        :
+    else
+        token_exit_code=$?
+        echo "ERROR: Cannot retrieve the serving HF token from SSM parameter '$HF_TOKEN_SSM_PARAMETER' (region: $token_region; AWS CLI exit: $token_exit_code). Check the preceding AWS error for the parameter, IAM/KMS permissions or connectivity failure." >&2
+        exit 1
+    fi
+    if [[ -z "${HF_TOKEN//[[:space:]]/}" || "$HF_TOKEN" == "None" || "$HF_TOKEN" == "null" ]]; then
+        echo "ERROR: The SSM serving HF token is empty." >&2
+        exit 1
+    fi
+    export HF_TOKEN
+    export HF_HUB_DISABLE_IMPLICIT_TOKEN=0
+    echo "Serving HF token retrieved from SSM parameter '$HF_TOKEN_SSM_PARAMETER' (region: $token_region)."
+    unset token_args token_region
+    if [[ "$token_trace_enabled" == true ]]; then set -x; fi
+    unset token_trace_enabled
 fi
 
 install_dependencies() {
@@ -131,15 +198,17 @@ if ! "$PYTHON_BIN" -c 'import torch; raise SystemExit(0 if torch.cuda.is_availab
     exit 1
 fi
 
-if [[ -d "$LORA_PATH" ]]; then
-    if [[ ! -f "$LORA_PATH/adapter_config.json" || ! -f "$LORA_PATH/adapter_model.safetensors" ]]; then
-        echo "ERROR: local adapter directory is incomplete: $LORA_PATH" >&2
+for adapter_path in "$LORA_PATH" "$FEEDBACK_LORA_PATH"; do
+    if [[ -d "$adapter_path" ]]; then
+        if [[ ! -f "$adapter_path/adapter_config.json" || ! -f "$adapter_path/adapter_model.safetensors" ]]; then
+            echo "ERROR: local adapter directory is incomplete: $adapter_path" >&2
+            exit 1
+        fi
+    elif [[ "$adapter_path" == /* || "$adapter_path" == ./* || "$adapter_path" == ../* ]]; then
+        echo "ERROR: local adapter path does not exist: $adapter_path" >&2
         exit 1
     fi
-elif [[ "$LORA_PATH" == /* || "$LORA_PATH" == ./* || "$LORA_PATH" == ../* ]]; then
-    echo "ERROR: local adapter path does not exist: $LORA_PATH" >&2
-    exit 1
-fi
+done
 
 if [[ "$QUANTIZATION" != "none" && "$QUANTIZATION" != "bitsandbytes" ]]; then
     echo "ERROR: FYP_VLLM_QUANTIZATION must be 'none' or 'bitsandbytes'." >&2
@@ -169,8 +238,10 @@ vllm_args=(
     --served-model-name "$BASE_MODEL_NAME"
     --default-chat-template-kwargs '{"enable_thinking": false}'
     --enable-lora
-    --lora-modules "${LORA_MODEL_NAME}=${LORA_PATH}"
+    --lora-modules "${LORA_MODEL_NAME}=${LORA_PATH}" "${FEEDBACK_LORA_MODEL_NAME}=${FEEDBACK_LORA_PATH}"
     --max-lora-rank "$MAX_LORA_RANK"
+    --max-loras "$MAX_LORAS"
+    --max-cpu-loras "$MAX_CPU_LORAS"
     --dtype "$DTYPE"
     --max-model-len "$MAX_MODEL_LEN"
     --max-num-seqs "$MAX_NUM_SEQS"
@@ -190,9 +261,10 @@ if [[ "$QUANTIZATION" == "bitsandbytes" ]]; then
     vllm_args+=(--quantization bitsandbytes)
 fi
 
-echo "Starting one vLLM server with two selectable models:"
+echo "Starting one vLLM server with three selectable model aliases:"
 echo "  Base:    $BASE_MODEL_NAME ($BASE_MODEL)"
 echo "  Adapter: $LORA_MODEL_NAME ($LORA_PATH)"
+echo "  Feedback: $FEEDBACK_LORA_MODEL_NAME ($FEEDBACK_LORA_PATH)"
 echo "  Quantization: $QUANTIZATION"
 echo "  FlashInfer sampler: $USE_FLASHINFER_SAMPLER"
 echo "  API:     http://${HOST}:${PORT}/v1"

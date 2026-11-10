@@ -21,7 +21,7 @@ done
 [[ -n "$eip" ]] || { echo "ERROR: Elastic IP association not visible in EC2 metadata" >&2; exit 1; }
 
 apt-get update
-apt-get install -y python3-venv ca-certificates curl git openssl e2fsprogs util-linux
+apt-get install -y python3-venv ca-certificates curl git openssl e2fsprogs util-linux awscli
 
 # Start CloudWatch collection before the long Docker and vLLM setup.
 # Terraform manages the destination log groups and their 7-day retention.
@@ -138,6 +138,8 @@ set_env "$backend_env" POSTGRES_PORT "127.0.0.1:5433"
 set_env "$backend_env" CORS_ORIGINS "http://$public_ip:3000"
 set_env "$backend_env" LLM_URL "http://host.docker.internal:8000/v1/chat/completions"
 set_env "$backend_env" LLM_MODEL "qwen35-9b-grading-qlora"
+set_env "$backend_env" LLM_GRADING_CONTRACT "criteria_array_v1"
+set_env "$backend_env" LLM_FEEDBACK_MODEL "qwen35-9b-feedback-qlora"
 
 # NEXT_PUBLIC variables are embedded in the frontend image during the build.
 set_env "$frontend_env" NEXT_PUBLIC_API_URL "http://$public_ip:8002"
@@ -221,6 +223,10 @@ Environment=FYP_VLLM_MAX_MODEL_LEN=8192
 Environment=FYP_VLLM_GPU_MEMORY_UTILIZATION=0.90
 Environment=FYP_VLLM_MAX_NUM_SEQS=1
 Environment=FYP_VLLM_MAX_LORA_RANK=64
+Environment=FYP_VLLM_MAX_LORAS=1
+Environment=FYP_VLLM_MAX_CPU_LORAS=4
+Environment=HF_TOKEN_SSM_PARAMETER=${hf_token_parameter}
+Environment=HF_TOKEN_SSM_REGION=${aws_region}
 Environment=HF_HOME=/mnt/llm-data/cache
 Environment=VENV_DIR=/mnt/llm-data/venv
 Environment=BOOTSTRAP_VENV=/mnt/llm-data/bootstrap
@@ -228,6 +234,8 @@ Environment=UV_CACHE_DIR=/mnt/llm-data/uv-cache
 Environment=UV_PYTHON_INSTALL_DIR=/mnt/llm-data/uv-python
 Environment=PIP_CACHE_DIR=/mnt/llm-data/pip-cache
 Environment=XDG_CACHE_HOME=/mnt/llm-data/xdg-cache
+# Optional host configuration and HF read token; keep credentials outside user data.
+EnvironmentFile=-/etc/qwen-vllm.env
 ExecStart=/opt/qwen-vllm/Script/serve_qwen35_vllm.sh
 Restart=on-failure
 RestartSec=30
