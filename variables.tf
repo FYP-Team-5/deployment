@@ -11,9 +11,9 @@ variable "name" {
 }
 
 variable "vllm_hf_token_parameter" {
-  description = "Existing SSM SecureString containing an HF read token for both serving adapters. Empty disables SSM lookup; the token value is never read by Terraform."
+  description = "Existing SSM SecureString containing an HF token with read access to both serving adapters. Reuses the existing training token by default. Empty disables SSM lookup; Terraform never reads the token value."
   type        = string
-  default     = "/fyp/serving/hf-token"
+  default     = "/fyp/training/hf-token"
   nullable    = false
 
   validation {

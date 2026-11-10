@@ -81,11 +81,12 @@ the access token. The grading candidate registry continues downloading its
 public adapters anonymously and does not deploy feedback adapters.
 
 Serving reads its HF token from the existing SSM SecureString named by
-`vllm_hf_token_parameter` (default `/fyp/serving/hf-token`). Terraform grants the
+`vllm_hf_token_parameter` (default `/fyp/training/hf-token`). Terraform grants the
 serving role access and passes the parameter identity to systemd; the wrapper
-fetches the value at startup. No serving `.env` file is required. This is separate
-from the publisher's write token at `/fyp/training/hf-token`; the serving token
-only needs read access to both adapters. See the [serving setup](../README.md#grading-and-feedback-on-one-vllm-instance).
+fetches the value at startup. No serving `.env` file is required. By default it
+reuses the publisher's existing token; that token must also read the feedback
+adapter. A dedicated read-only serving token can be selected with a different
+parameter path. See the [serving setup](../README.md#grading-and-feedback-on-one-vllm-instance).
 
 ## Run Terraform and test
 

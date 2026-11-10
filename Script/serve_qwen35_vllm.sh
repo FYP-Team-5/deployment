@@ -125,8 +125,11 @@ if [[ -n "${HF_TOKEN_SSM_PARAMETER:-}" ]]; then
     if [[ -n "$token_region" ]]; then
         token_args+=(--region "$token_region")
     fi
-    if ! HF_TOKEN="$(AWS_PAGER="" AWS_CLI_AUTO_PROMPT=off aws "${token_args[@]}")"; then
-        echo "ERROR: Cannot retrieve the serving HF token from SSM. Check the parameter, region and instance-role permissions." >&2
+    if HF_TOKEN="$(AWS_PAGER="" AWS_CLI_AUTO_PROMPT=off aws "${token_args[@]}")"; then
+        :
+    else
+        token_exit_code=$?
+        echo "ERROR: Cannot retrieve the serving HF token from SSM parameter '$HF_TOKEN_SSM_PARAMETER' (region: $token_region; AWS CLI exit: $token_exit_code). Check the preceding AWS error for the parameter, IAM/KMS permissions or connectivity failure." >&2
         exit 1
     fi
     if [[ -z "${HF_TOKEN//[[:space:]]/}" || "$HF_TOKEN" == "None" || "$HF_TOKEN" == "null" ]]; then
@@ -135,6 +138,7 @@ if [[ -n "${HF_TOKEN_SSM_PARAMETER:-}" ]]; then
     fi
     export HF_TOKEN
     export HF_HUB_DISABLE_IMPLICIT_TOKEN=0
+    echo "Serving HF token retrieved from SSM parameter '$HF_TOKEN_SSM_PARAMETER' (region: $token_region)."
     unset token_args token_region
     if [[ "$token_trace_enabled" == true ]]; then set -x; fi
     unset token_trace_enabled

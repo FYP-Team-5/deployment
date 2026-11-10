@@ -74,7 +74,7 @@ sudo apt-get install -y awscli
 sudo mkdir -p /etc/systemd/system/qwen-vllm.service.d
 sudo tee /etc/systemd/system/qwen-vllm.service.d/20-adapters.conf >/dev/null <<'UNIT'
 [Service]
-Environment=HF_TOKEN_SSM_PARAMETER=/fyp/serving/hf-token
+Environment=HF_TOKEN_SSM_PARAMETER=/fyp/training/hf-token
 Environment=HF_TOKEN_SSM_REGION=us-east-1
 EnvironmentFile=-/etc/qwen-vllm.env
 UNIT
@@ -83,8 +83,9 @@ sudo systemctl restart qwen-vllm.service
 sudo journalctl -u qwen-vllm.service -f
 ```
 
-Create `/fyp/serving/hf-token` in SSM Parameter Store as a **SecureString** in the
-deployment region, with a Hugging Face token that can read both adapter repos.
+By default, serving reuses the existing `/fyp/training/hf-token` **SecureString**
+in the deployment region. Ensure its Hugging Face token can read both adapter
+repos. A separate serving-only read token can be selected with the variable below.
 Terraform passes its name and region to systemd and grants the serving instance
 role `ssm:GetParameter` for that parameter. At each service start the wrapper
 retrieves it with `--with-decryption` and exports `HF_TOKEN` only to the running
@@ -92,10 +93,10 @@ process. A configured SSM lookup failure stops startup rather than falling back
 to an old token. The token is not written to a file or read into Terraform state.
 See [AWS SecureString access](https://docs.aws.amazon.com/systems-manager/latest/userguide/secure-string-parameter-kms-encryption.html).
 
-To use a different existing parameter, set only its identity in local tfvars:
+To set the path explicitly or select another existing parameter, use local tfvars:
 
 ```hcl
-vllm_hf_token_parameter = "/fyp/serving/hf-token"
+vllm_hf_token_parameter = "/fyp/training/hf-token"
 # Optional for a customer-managed KMS key; omit for the default aws/ssm key.
 # vllm_hf_token_kms_key_arn = "arn:aws:kms:us-east-1:ACCOUNT_ID:key/KEY_ID"
 ```
@@ -110,6 +111,13 @@ avoid replacing the serving instance just to update user data.
 without SSM, leave `HF_TOKEN_SSM_PARAMETER` unset and export `HF_TOKEN` directly.
 For Terraform, `vllm_hf_token_parameter = ""` disables lookup and its dedicated
 policy. When SSM is configured its value takes precedence over a direct token.
+
+For `Cannot retrieve the serving HF token`, check the preceding AWS CLI error.
+`ParameterNotFound` means the configured name does not exist in that region;
+`AccessDeniedException` requires checking the instance role and, for a custom
+KMS key, its key policy. The wrapper prints the selected name, region and exit
+code without printing the token. The SSM startup default reuses the training
+parameter so an additional `/fyp/serving/hf-token` does not need to be created.
 
 Once startup completes, verify both adapter aliases are listed:
 

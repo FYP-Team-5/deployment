@@ -36,7 +36,8 @@ class ServingWrapperTests(unittest.TestCase):
             "from pathlib import Path\n"
             "Path(os.environ['TEST_SSM_LOG']).write_text(json.dumps(sys.argv[1:]))\n"
             "if os.environ.get('TEST_SSM_ERROR') == '1':\n"
-            "    sys.exit('Simulated AccessDenied')\n"
+            "    print('Simulated AccessDenied', file=sys.stderr)\n"
+            "    sys.exit(42)\n"
             "print(os.environ.get('TEST_SSM_TOKEN', 'fixture-token-from-ssm'))\n"
         )
         aws_stub.chmod(0o755)
@@ -141,6 +142,7 @@ class ServingWrapperTests(unittest.TestCase):
         self.assertIn("--with-decryption", request)
         self.assertEqual(request[request.index("--region") + 1], "us-east-1")
         self.assertNotIn(token, result.stdout + result.stderr)
+        self.assertIn("Serving HF token retrieved from SSM parameter", result.stdout)
 
     def test_ssm_token_is_not_leaked_under_shell_tracing(self):
         token = "fixture-secret-hidden-from-trace"
@@ -161,6 +163,9 @@ class ServingWrapperTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("Cannot retrieve the serving HF token", result.stderr)
+        self.assertIn("parameter '/fyp/serving/hf-token'", result.stderr)
+        self.assertIn("region: us-east-1", result.stderr)
+        self.assertIn("AWS CLI exit: 42", result.stderr)
         self.assertNotIn("Starting one vLLM", result.stdout)
 
     def test_empty_ssm_tokens_are_rejected(self):
