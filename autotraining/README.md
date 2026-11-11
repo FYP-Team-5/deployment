@@ -79,6 +79,9 @@ use the HF token stored in SSM.
    TRAINING_HF_REPO=SmuFypTeam5/GradingQlora
    TRAINING_FEEDBACK_HF_REPO=SmuFypTeam5/feedback
    MODEL_ADAPTER_DIRECTORY=/mnt/llm-data/adapters
+   # Optional hands-off promotion: nightly runs that beat the base model's
+   # held-out MAE and QWK deploy automatically, still behind smoke tests.
+   TRAINING_AUTO_DEPLOY_ENABLED=false
    ```
 
 4. Install the updated [serving wrapper](../Script/serve_qwen35_vllm.sh) on the serving host. Add this override with `sudo systemctl edit qwen-vllm.service`, then reload systemd and restart the service:
