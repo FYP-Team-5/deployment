@@ -117,6 +117,24 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(float(row["student_score"]), 2)
             self.assertEqual(row["question"], "Question 0,\nnext line")
 
+    def test_accepts_feedback_column_and_preserves_targets(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = self.dataset(folder)
+            with source.open(encoding="utf-8-sig", newline="") as stream:
+                rows = list(csv.DictReader(stream))
+            for row in rows:
+                row["feedback"] = 'Keep this explanation, including "quotes".\nNext line.'
+            with source.open("w", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=[*FIELDS, "feedback"])
+                writer.writeheader()
+                writer.writerows(rows)
+            processed, stats = train.normalize_dataset(source)
+            with processed.open(newline="") as stream:
+                normalized = list(csv.DictReader(stream))
+            self.assertEqual(stats["training_rows"], 12)
+            self.assertEqual(normalized[0]["feedback"], rows[0]["feedback"])
+            self.assertEqual(json.loads(normalized[0]["criteria_score[]"]), [1, 0])
+
     def test_partial_credit_is_counted_and_excluded(self):
         with tempfile.TemporaryDirectory() as folder:
             _, stats = train.normalize_dataset(

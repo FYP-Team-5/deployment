@@ -102,7 +102,7 @@ terraform apply autotraining.tfplan
 
 Review the plan before applying; avoid replacing the serving instance or applying during training. The schedule remains disabled.
 
-New deployments set backend `TRAINING_STATE_MACHINE_ARN` automatically. For existing hosts, set it to `terraform output -raw autotraining_state_machine_arn`, then rebuild/restart the backend and updated frontend. The backend uses the serving EC2 instance role; Terraform grants `states:StartExecution` only for this workflow and sets the IMDSv2 response hop limit to 2 so the Docker container can obtain role credentials. No AWS access keys belong in the frontend or backend `.env`.
+New deployments set backend `TRAINING_STATE_MACHINE_ARN` automatically. For existing hosts, set it to `terraform output -raw autotraining_state_machine_arn`, then rebuild/restart the backend and updated frontend. The backend uses the serving EC2 instance role; Terraform grants `states:StartExecution` and `states:ListExecutions` only for this workflow and sets the IMDSv2 response hop limit to 2 so the Docker container can obtain role credentials. `ListExecutions` backs the read-only `GET /api/v1/training-runs/in-progress` view, which shows a running or recently failed training run on **Trained models** before any candidate is registered and fails open to an empty list when AWS is unreachable. No AWS access keys belong in the frontend or backend `.env`.
 
 Sign in as an instructor, open **Trained models**, and select **Train now** to request one run on the latest ready dataset at any time. Manual requests retrain an unchanged dataset; the GPU lock still skips overlapping runs. The page shows acceptance or an error and refreshes candidates automatically. Training publishes only a candidate branch and does not activate the resulting model; review and deploy it separately. Failed browser requests retain their request ID so retries cannot start the same request twice.
 
@@ -138,8 +138,9 @@ Run `terraform plan -out=enable.tfplan`, review it, then `terraform apply enable
 - **Instance:** a dedicated training EC2 instance inherits the serving instance type (`g5.xlarge` currently). Leave `autotraining_instance_type` unset or `null` to keep them matched; an explicit value overrides this default. Training remains isolated from the serving instance.
 - **SSH:** while the trainer is running, select it in the EC2 console, choose **Connect → EC2 Instance Connect**, use its public IPv4 address, and sign in as `ubuntu`. Port 22 accepts the region's AWS-managed EC2 Instance Connect prefix list. The console identity needs permission to use Instance Connect. SSM remains available for training commands and diagnostics.
 - **QLoRA:** rank 48 / alpha 96, NF4 4-bit with double quantization, learning rate 5e-5, up to three epochs, batch 1 × accumulation 8, 4,096-token limit and an 80/10/10 question-group split. See [train.py](train.py) and [requirements.txt](requirements.txt).
-- **CSV:** uses the backend rubric schema. Partial-credit rows and missing desired answers are excluded and counted; at least one compatible row is required. Fewer than ten unique questions reuse training data for validation and evaluation, recorded as `held_out_evaluation=false` and `split_strategy=reuse_training_data` in the saved configuration. Larger datasets retain the grouped 80/10/10 split.
+- **CSV:** accepts the backend's nine-column rubric schema with trailing `feedback`, plus legacy eight-column datasets. Feedback text is retained during normalization; this runner trains only the grading adapter and does not use feedback as a grading input or target. Partial-credit rows and missing desired answers are excluded and counted; at least one compatible row is required. Fewer than ten unique questions reuse training data for validation and evaluation, recorded as `held_out_evaluation=false` and `split_strategy=reuse_training_data` in the saved configuration. Larger datasets retain the grouped 80/10/10 split.
 - **Recovery:** training has a 12-hour SSM timeout. Terminal events and a 15-minute watchdog clean up failed/abandoned executions; the watchdog stops GPU runs older than 14 hours.
+- **Publication failure:** the message `HF publication/backend notification failed; retry without retraining` means the workflow reached the final `PublicationStatus` step and that SSM command did not succeed, so the evaluated adapter is on the GPU host and in S3 but no backend candidate exists. The backend registers candidates only from this notification, so nothing new appears on **Trained models**. Read the `StandardErrorContent` of that command (`aws ssm get-command-invocation --instance-id <backend-host> --command-id <id>`) and compare the callback's HTTP status with the table in [backend/README.md](../../backend/README.md): 404 means the backend image predates `POST /api/v1/training-runs` and must be rebuilt, 401 means the backend `TRAINING_CALLBACK_TOKEN` no longer matches the SSM value, 409 means the manifest changed for that run id, and a timeout means the private callback URL was unreachable. Retrying the execution never retrains; it repeats only publication and notification.
 - **Local storage:** the trainer retains its encrypted 200 GiB gp3 EBS root volume when using `g5.xlarge`. `/opt/fyp-autotraining` contains the dataset, model checkout, virtual environment, managed Python, HF/package caches and checkpoints. The run script checks for at least 60 GiB free before downloads (`FYP_TRAINING_MIN_FREE_GIB` can override this budget), prints the actual workspace filesystem, and cleans each run's temporary files and output directory on exit. Completed-run markers and caches remain on EBS across nightly stops. It does not depend on or format the DLAMI NVMe instance store. `FYP_TRAINING_WORK_DIRECTORY` can override the workspace path; use persistent storage if overriding it.
 - **Artifact storage:** S3 retains unpublished artifacts and current run records. Published staging copies become eligible for expiry once older than 30 days; HF retains the published commit.
 - **Status:** inspect Step Functions executions, CloudWatch training/coordinator logs, and **Instructor → Trained models**. Verify a live AWS/GPU/HF/vLLM run before enabling the schedule.
@@ -147,27 +148,32 @@ Run `terraform plan -out=enable.tfplan`, review it, then `terraform apply enable
 
 ## Teardown
 
-The training bucket is versioned and defaults to `autotraining_force_destroy = false`.
-S3 requires every object version and delete marker to be removed before bucket
-deletion. `aws s3 rm --recursive` or `aws s3 rb --force` does not empty old versions.
+The training bucket is versioned and defaults to `autotraining_force_destroy = true`,
+so a `terraform destroy` also empties the bucket. Set the variable to `false` to
+guard against accidental teardown. Without force-destroy, S3 requires every object
+version and delete marker to be removed before bucket deletion;
+`aws s3 rm --recursive` or `aws s3 rb --force` does not empty old versions.
 Retained versions continue to incur storage charges.
 
 To permanently remove datasets, candidate artifacts, receipts, scripts and run
-history during an intentional teardown, first record the opt-in on the bucket:
+history during an intentional teardown:
+
+```bash
+# From deployment/.
+terraform destroy
+```
+
+These commands permanently delete every bucket object version, including the
+dataset snapshots, candidate artifacts and run history. Copy anything needed
+before running them.
+
+If a destroy still fails with `BucketNotEmpty` because the bucket was recorded
+in state with `force_destroy = false` (stacks created before the default
+changed), first record the new setting on the existing bucket without
+recreating the training stack, then destroy again:
 
 ```bash
 # From deployment/. Review the bucket-only change before accepting it.
-terraform apply -target=aws_s3_bucket.autotraining \
-  -var='autotraining_force_destroy=true'
-terraform destroy -var='autotraining_force_destroy=true'
+terraform apply -target=aws_s3_bucket.autotraining
+terraform destroy
 ```
-
-The targeted apply is a recovery step when a destroy has already removed other
-resources and left only the nonempty bucket. It updates the bucket's Terraform
-setting without recreating the training stack. For a planned teardown of an
-intact stack, stop training and apply the opt-in with a reviewed normal plan
-before destroying. Setting the flag only on `terraform destroy` does not record
-it on the existing bucket first.
-
-These commands permanently delete every bucket version; copy anything needed
-before running them. Keep the default `false` for deployments that retain data.

@@ -34,7 +34,7 @@ def normalize_dataset(path):
             "criteria_max_score[]",
             "student_score",
         ]
-        if fields != required:
+        if fields not in (required, [*required, "feedback"]):
             raise ValueError("Incorrect training CSV columns or order")
         for number, row in enumerate(reader, 2):
             counts["source_rows"] += 1
@@ -287,10 +287,11 @@ def run(args):
         "adapter_uri": f"s3://{args.bucket}/{prefix}/adapter/",
         "metrics": clean(metrics),
         "baseline_metrics": clean(scope.get("baseline_metrics", {})),
+        "feedback_required": getattr(args, "grading_only", False),
     }
     s3.put_object(
         Bucket=args.bucket,
-        Key=f"{prefix}/result.json",
+        Key=f"{prefix}/grading/result.json" if getattr(args, "grading_only", False) else f"{prefix}/result.json",
         Body=json.dumps(manifest, allow_nan=False).encode(),
         ContentType="application/json",
         ServerSideEncryption="AES256",
@@ -299,6 +300,7 @@ def run(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--grading-only", action="store_true")
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--checksum", required=True)
     parser.add_argument("--run-id", required=True)

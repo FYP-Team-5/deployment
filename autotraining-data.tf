@@ -13,9 +13,9 @@ variable "autotraining_instance_type" {
 }
 variable "autotraining_force_destroy" {
   type        = bool
-  default     = false
+  default     = true
   nullable    = false
-  description = "Allow Terraform to permanently delete all training-bucket objects, versions and delete markers when destroying the bucket. Enable only for an intentional teardown."
+  description = "Allow Terraform to permanently delete all training-bucket objects, versions and delete markers when destroying the bucket. Defaults to true; set to false to guard against accidental teardown."
 }
 
 resource "aws_s3_bucket" "autotraining" {
@@ -47,6 +47,7 @@ locals {
     "export_backend.sh" = "autotraining/export_backend.sh"
     "run_training.sh"   = "autotraining/run_training.sh"
     "train.py"          = "autotraining/train.py"
+    "train_feedback.py" = "autotraining/train_feedback.py"
     "requirements.txt"  = "autotraining/requirements.txt"
     "publish.py"        = "autotraining/publish.py"
     "publish.sh"        = "autotraining/publish.sh"
@@ -110,6 +111,10 @@ output "autotraining_control_prefix" {
 variable "autotraining_hf_repo" {
   type    = string
   default = "SmuFypTeam5/GradingQlora"
+}
+variable "autotraining_feedback_hf_repo" {
+  type    = string
+  default = "SmuFypTeam5/feedback"
 }
 variable "autotraining_hf_token_parameter" {
   description = "Existing SSM SecureString containing the HF token used only for branch creation/uploads; public reads need no token."
