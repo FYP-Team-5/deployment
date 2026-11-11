@@ -118,8 +118,12 @@ aws stepfunctions start-execution \
 The empty input keeps scheduled-run behaviour, including checksum deduplication.
 Use `--input '{"force_retrain":true}'` to request fresh training of the latest
 ready CSV even if its checksum was published previously. Neither input bypasses
-the GPU lock. The reusable one-row execution test lives in the backend at
-`app/demo/training/`; it saves only local weights and does not publish a candidate.
+the GPU lock. The backend's `app/demo/dataset/mock_training_data.csv` exercises
+this same workflow with ten unique questions and an 8/1/1 split. With demo seeding
+enabled, backend startup uploads it once as a new version, including over the
+previous bundled demo dataset. Wait for it
+to be active and ready with ten rows before clicking **Train now**. Later
+instructor uploads are preserved across restarts. See the dataset folder's README.
 
 Confirm GPU shutdown, the HF candidate branch, backend metrics and instructor deployment checks. Then save this in a local `nightly.auto.tfvars` file:
 
@@ -134,7 +138,7 @@ Run `terraform plan -out=enable.tfplan`, review it, then `terraform apply enable
 - **Instance:** a dedicated training EC2 instance inherits the serving instance type (`g5.xlarge` currently). Leave `autotraining_instance_type` unset or `null` to keep them matched; an explicit value overrides this default. Training remains isolated from the serving instance.
 - **SSH:** while the trainer is running, select it in the EC2 console, choose **Connect → EC2 Instance Connect**, use its public IPv4 address, and sign in as `ubuntu`. Port 22 accepts the region's AWS-managed EC2 Instance Connect prefix list. The console identity needs permission to use Instance Connect. SSM remains available for training commands and diagnostics.
 - **QLoRA:** rank 48 / alpha 96, NF4 4-bit with double quantization, learning rate 5e-5, up to three epochs, batch 1 × accumulation 8, 4,096-token limit and an 80/10/10 question-group split. See [train.py](train.py) and [requirements.txt](requirements.txt).
-- **CSV:** uses the backend rubric schema. Partial-credit rows and missing desired answers are excluded and counted; at least ten compatible unique questions are required.
+- **CSV:** uses the backend rubric schema. Partial-credit rows and missing desired answers are excluded and counted; at least one compatible row is required. Fewer than ten unique questions reuse training data for validation and evaluation, recorded as `held_out_evaluation=false` and `split_strategy=reuse_training_data` in the saved configuration. Larger datasets retain the grouped 80/10/10 split.
 - **Recovery:** training has a 12-hour SSM timeout. Terminal events and a 15-minute watchdog clean up failed/abandoned executions; the watchdog stops GPU runs older than 14 hours.
 - **Local storage:** the trainer retains its encrypted 200 GiB gp3 EBS root volume when using `g5.xlarge`. `/opt/fyp-autotraining` contains the dataset, model checkout, virtual environment, managed Python, HF/package caches and checkpoints. The run script checks for at least 60 GiB free before downloads (`FYP_TRAINING_MIN_FREE_GIB` can override this budget), prints the actual workspace filesystem, and cleans each run's temporary files and output directory on exit. Completed-run markers and caches remain on EBS across nightly stops. It does not depend on or format the DLAMI NVMe instance store. `FYP_TRAINING_WORK_DIRECTORY` can override the workspace path; use persistent storage if overriding it.
 - **Artifact storage:** S3 retains unpublished artifacts and current run records. Published staging copies become eligible for expiry once older than 30 days; HF retains the published commit.

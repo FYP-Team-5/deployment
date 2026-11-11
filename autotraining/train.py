@@ -93,13 +93,14 @@ def normalize_dataset(path):
                 raise ValueError(
                     f"Invalid training CSV row {number}: {error.__class__.__name__}"
                 ) from None
-    if len({row["question"].strip() for row in retained}) < 10:
-        raise ValueError("Not enough compatible unique questions to split 80/10/10")
+    if not retained:
+        raise ValueError("No compatible training rows remain")
     with result_path.open("w", encoding="utf-8", newline="") as target:
         writer = csv.DictWriter(target, fieldnames=fields)
         writer.writeheader()
         writer.writerows(retained)
     counts["training_rows"] = len(retained)
+    counts["unique_questions"] = len({row["question"].strip() for row in retained})
     return result_path, counts
 
 
@@ -109,6 +110,7 @@ def run(args):
     if actual != args.checksum:
         raise ValueError("Training CSV checksum mismatch")
     normalized, dataset_stats = normalize_dataset(data)
+    held_out_evaluation = dataset_stats["unique_questions"] >= 10
     notebook_path = Path(args.notebook)
     notebook = json.loads(notebook_path.read_text())
     from huggingface_hub import HfApi
@@ -127,6 +129,17 @@ def run(args):
         code = cell["source"]
         if isinstance(code, list):
             code = "".join(code)
+        if number == 16 and not held_out_evaluation:
+            # The reference's grouped 80/10/10 split needs ten questions.
+            # Small datasets still exercise training and generation, but their
+            # evaluation reuses training examples and must be labelled as such.
+            scope.update(
+                train_dataset=scope["dataset"],
+                validation_dataset=scope["dataset"],
+                test_dataset=scope["dataset"],
+            )
+            print("Small dataset: validation and evaluation reuse training rows.")
+            continue
         if number in (18, 22):
             code = code.replace(
                 "from_pretrained(MODEL_ID)",
@@ -170,7 +183,7 @@ def run(args):
         raise RuntimeError("The reference notebook did not finish evaluation")
     metrics = scope.get("finetuned_metrics")
     if not metrics or metrics.get("valid_examples", 0) < 1:
-        raise RuntimeError("No valid held-out predictions")
+        raise RuntimeError("No valid evaluation predictions")
     files = ["adapter_config.json", "adapter_model.safetensors"]
     for filename in files:
         if not (output / filename).is_file():
@@ -215,6 +228,10 @@ def run(args):
             "sequence_limit": scope["sequence_limit"],
             "base_model_revision": base_revision,
             "notebook_sha256": hashlib.sha256(notebook_path.read_bytes()).hexdigest(),
+            "held_out_evaluation": held_out_evaluation,
+            "split_strategy": "question_group_80_10_10"
+            if held_out_evaluation
+            else "reuse_training_data",
         }
     )
     import importlib.metadata

@@ -85,12 +85,12 @@ class MemoryState:
 
 
 class DatasetTests(unittest.TestCase):
-    def dataset(self, directory, change=None):
+    def dataset(self, directory, change=None, count=12):
         source = Path(directory) / "dataset.csv"
         with source.open("w", encoding="utf-8-sig", newline="") as target:
             writer = csv.DictWriter(target, fieldnames=FIELDS)
             writer.writeheader()
-            for i in range(12):
+            for i in range(count):
                 row = {
                     "id": str(i),
                     "question": f"Question {i},\nnext line",
@@ -101,7 +101,7 @@ class DatasetTests(unittest.TestCase):
                     "criteria_max_score[]": "[2.0, 1.0]",
                     "student_score": "2.0",
                 }
-                if i == 11 and change:
+                if i == count - 1 and change:
                     row.update(change)
                 writer.writerow(row)
         return source
@@ -157,7 +157,7 @@ class DatasetTests(unittest.TestCase):
             ):
                 train.normalize_dataset(self.dataset(folder, change))
 
-    def test_requires_ten_unique_questions(self):
+    def test_accepts_one_unique_question(self):
         with tempfile.TemporaryDirectory() as folder:
             source = self.dataset(folder)
             with source.open(encoding="utf-8-sig") as stream:
@@ -168,16 +168,31 @@ class DatasetTests(unittest.TestCase):
                 writer = csv.DictWriter(target, fieldnames=FIELDS)
                 writer.writeheader()
                 writer.writerows(rows)
-            with self.assertRaises(ValueError):
-                train.normalize_dataset(source)
+            _, stats = train.normalize_dataset(source)
+            self.assertEqual(stats["unique_questions"], 1)
+            self.assertEqual(stats["training_rows"], 12)
+
+    def test_rejects_no_compatible_rows(self):
+        for count, change in ((0, None), (1, {"desired_answer": ""})):
+            with (
+                self.subTest(count=count),
+                tempfile.TemporaryDirectory() as folder,
+                self.assertRaisesRegex(ValueError, "No compatible training rows"),
+            ):
+                train.normalize_dataset(self.dataset(folder, change, count=count))
 
 
 class RunnerTests(unittest.TestCase):
     dataset = DatasetTests.dataset
 
     def test_manifest_published_last_with_effective_configuration(self):
+        for row_count in (1, 2, 9, 10, 12):
+            with self.subTest(row_count=row_count):
+                self.check_manifest(row_count)
+
+    def check_manifest(self, row_count):
         with tempfile.TemporaryDirectory() as folder:
-            source = self.dataset(folder)
+            source = self.dataset(folder, count=row_count)
             notebook = Path(folder) / "reference.ipynb"
             cells = [{"cell_type": "markdown", "source": ""} for _ in range(47)]
             config_names = [
@@ -200,6 +215,28 @@ class RunnerTests(unittest.TestCase):
                 "cell_type": "code",
                 "source": [f"{name} = 1\n" for name in config_names],
             }
+            cells[8] = {
+                "cell_type": "code",
+                "source": f"records = [0] * {row_count}\ndataset = records",
+            }
+            cells[16] = {
+                "cell_type": "code",
+                "source": (
+                    "assert len(dataset) >= 10, 'Small datasets must bypass the reference split'\n"
+                    "train_dataset, validation_dataset, test_dataset = dataset[:-2], dataset[-2:-1], dataset[-1:]"
+                ),
+            }
+            cells[20] = {
+                "cell_type": "code",
+                "source": (
+                    "if len(dataset) < 10:\n"
+                    "    assert train_dataset is dataset\n"
+                    "    assert validation_dataset is dataset\n"
+                    "    assert test_dataset is dataset\n"
+                    "else:\n"
+                    "    assert len(train_dataset) + len(validation_dataset) + len(test_dataset) == len(dataset)"
+                ),
+            }
             cells[44] = {
                 "cell_type": "code",
                 "source": (
@@ -207,7 +244,7 @@ class RunnerTests(unittest.TestCase):
                     "evaluation_completed = True\n"
                     "finetuned_metrics = {'valid_examples': 2, 'final_score_mae': 0.5, 'f1': float('nan')}\n"
                     "baseline_metrics = {'valid_examples': 2, 'final_score_mae': 1.0}\n"
-                    "records = [0] * 12\nsequence_limit = MAX_SEQ_LENGTH\n"
+                    "sequence_limit = MAX_SEQ_LENGTH\n"
                     "bnb_config = SimpleNamespace(to_dict=lambda: {'load_in_4bit': True})\n"
                     "compute_dtype = 'torch.bfloat16'\ntarget_modules = ['model.layers.0.q_proj']\n"
                     "model = SimpleNamespace(config=SimpleNamespace(_commit_hash=BASE_REVISION))\n"
@@ -244,6 +281,15 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(manifest["configuration"]["LORA_R"], 48)
             self.assertEqual(manifest["configuration"]["LORA_ALPHA"], 96)
             self.assertEqual(manifest["configuration"]["MAX_SEQ_LENGTH"], 4096)
+            self.assertEqual(manifest["dataset_rows"], row_count)
+            self.assertEqual(manifest["dataset_stats"]["training_rows"], row_count)
+            self.assertEqual(
+                manifest["configuration"]["held_out_evaluation"], row_count >= 10
+            )
+            self.assertEqual(
+                manifest["configuration"]["split_strategy"],
+                "question_group_80_10_10" if row_count >= 10 else "reuse_training_data",
+            )
             self.assertEqual(
                 manifest["configuration"]["base_model_revision"], "fixed-revision"
             )
