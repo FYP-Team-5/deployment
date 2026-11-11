@@ -98,6 +98,7 @@ resource "aws_lambda_function" "autotraining" {
       TRAINING_INSTANCE_ID     = aws_instance.autotraining.id
       ARTIFACT_BUCKET          = aws_s3_bucket.autotraining.bucket
       HF_REPO                  = var.autotraining_hf_repo
+      FEEDBACK_HF_REPO         = var.autotraining_feedback_hf_repo
       HF_TOKEN_PARAMETER       = var.autotraining_hf_token_parameter
       CALLBACK_TOKEN_PARAMETER = var.autotraining_callback_token_parameter
       CALLBACK_URL             = "http://${aws_instance.llm.private_ip}:8002/api/v1/training-runs"

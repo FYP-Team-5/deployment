@@ -83,6 +83,10 @@ if [[ ! -x .venv/bin/python ]] || ! .venv/bin/python -c 'import sys; assert sys.
 fi
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python -m pip check
+# Check feedback targets before spending GPU time on either model.
+.venv/bin/python train_feedback.py \
+    --prepare-only --bucket "$BUCKET" --checksum "$CHECKSUM" --run-id "$RUN_ID" \
+    --version-id "$VERSION_ID" --dataset "$WORK/dataset.csv" --output "$WORK/feedback-output-$RUN_ID"
 .venv/bin/python train.py \
     --grading-only \
     --bucket "$BUCKET" \

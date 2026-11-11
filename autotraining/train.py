@@ -291,7 +291,9 @@ def run(args):
     }
     s3.put_object(
         Bucket=args.bucket,
-        Key=f"{prefix}/grading/result.json" if getattr(args, "grading_only", False) else f"{prefix}/result.json",
+        Key=f"{prefix}/grading/result.json"
+        if getattr(args, "grading_only", False)
+        else f"{prefix}/result.json",
         Body=json.dumps(manifest, allow_nan=False).encode(),
         ContentType="application/json",
         ServerSideEncryption="AES256",

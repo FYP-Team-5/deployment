@@ -51,6 +51,8 @@ resource "aws_iam_role_policy" "autotraining" {
           "${aws_s3_bucket.autotraining.arn}/datasets/*",
           "${aws_s3_bucket.autotraining.arn}/scripts/run_training.sh",
           "${aws_s3_bucket.autotraining.arn}/scripts/train.py",
+          "${aws_s3_bucket.autotraining.arn}/scripts/train_feedback.py",
+          "${aws_s3_bucket.autotraining.arn}/candidates/*/grading/result.json",
           "${aws_s3_bucket.autotraining.arn}/scripts/requirements.txt"
         ]
       },

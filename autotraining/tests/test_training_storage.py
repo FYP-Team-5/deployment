@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -26,7 +27,9 @@ if command == "df":
     print("/dev/test-ebs 209715200 1048576 " + os.environ["TEST_FREE_KIB"] + " 1% /")
 elif command == "aws":
     Path(args[3]).write_text("test download")
-elif command == "python" and "train.py" in args:
+elif command == "python" and "--prepare-only" in args:
+    sys.exit(int(os.environ.get("TEST_PREPARE_EXIT", "0")))
+elif command == "python" and ("train.py" in args or "train_feedback.py" in args) and "--prepare-only" not in args:
     output = Path(args[args.index("--output") + 1])
     output.mkdir()
     (output / "checkpoint").touch()
@@ -37,11 +40,28 @@ elif command == "python" and "train.py" in args:
     )}
     with open(os.environ["TEST_TRAIN_LOG"], "a") as log:
         log.write(json.dumps({"paths": paths, "args": args}) + "\n")
-    sys.exit(int(os.environ.get("TEST_TRAIN_EXIT", "0")))
+    exit_key = "TEST_FEEDBACK_EXIT" if "train_feedback.py" in args else "TEST_TRAIN_EXIT"
+    sys.exit(int(os.environ.get(exit_key, "0")))
 """
 
 
 class TrainingStorageTests(unittest.TestCase):
+    def test_trainer_iam_allows_every_downloaded_script_and_feedback_stage_input(self):
+        policy = (SCRIPT.parents[1] / "autotraining-gpu.tf").read_text()
+        downloads = re.findall(
+            r'aws s3 cp "s3://\$BUCKET/scripts/([^\"]+)"', SCRIPT.read_text()
+        )
+        self.assertIn("train_feedback.py", downloads)
+        for filename in downloads:
+            with self.subTest(filename=filename):
+                self.assertIn(
+                    f'"${{aws_s3_bucket.autotraining.arn}}/scripts/{filename}"', policy
+                )
+        self.assertIn(
+            '"${aws_s3_bucket.autotraining.arn}/candidates/*/grading/result.json"',
+            policy,
+        )
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -106,7 +126,11 @@ class TrainingStorageTests(unittest.TestCase):
     def test_all_training_paths_use_persistent_workspace_without_nvme(self):
         result = self.run_training()
         self.assertEqual(result.returncode, 0, result.stderr)
-        training = json.loads(self.train_log.read_text())
+        stages = [json.loads(line) for line in self.train_log.read_text().splitlines()]
+        self.assertEqual(len(stages), 2)
+        self.assertIn("train.py", stages[0]["args"])
+        self.assertIn("train_feedback.py", stages[1]["args"])
+        training = stages[0]
         for path in training["paths"].values():
             self.assertTrue(Path(path).is_relative_to(self.work))
         for name in (
@@ -119,6 +143,7 @@ class TrainingStorageTests(unittest.TestCase):
             self.assertTrue(Path(training["paths"][name]).is_dir())
         self.assertFalse(Path(training["paths"]["TMPDIR"]).exists())
         self.assertFalse((self.work / f"output-{RUN_ID}").exists())
+        self.assertFalse((self.work / f"feedback-output-{RUN_ID}").exists())
         self.assertTrue((self.work / f"completed-{RUN_ID}").is_file())
 
     def test_completed_run_keeps_cache_and_does_not_retrain_after_restart(self):
@@ -130,7 +155,20 @@ class TrainingStorageTests(unittest.TestCase):
         second = self.run_training(TEST_FREE_KIB="0")
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertTrue(cached.exists())
-        self.assertEqual(len(self.train_log.read_text().splitlines()), 1)
+        self.assertEqual(len(self.train_log.read_text().splitlines()), 2)
+
+    def test_feedback_failure_does_not_mark_the_pair_completed(self):
+        result = self.run_training(TEST_FEEDBACK_EXIT="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(len(self.train_log.read_text().splitlines()), 2)
+        self.assertFalse((self.work / f"completed-{RUN_ID}").exists())
+        self.assertFalse((self.work / f"feedback-output-{RUN_ID}").exists())
+
+    def test_missing_feedback_targets_fail_before_either_training_stage(self):
+        result = self.run_training(TEST_PREPARE_EXIT="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(self.train_log.exists())
+        self.assertFalse((self.work / f"completed-{RUN_ID}").exists())
 
     def test_insufficient_disk_space_fails_before_downloads(self):
         result = self.run_training(TEST_FREE_KIB=str(1024 * 1024))

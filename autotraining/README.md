@@ -1,6 +1,6 @@
 # Nightly retraining
 
-Retrain **Qwen3.5-9B** at **00:10 SGT** when a new ready dataset is available. Publish the evaluated adapter to Hugging Face, report its metrics to the backend, and let an instructor explicitly deploy it.
+Retrain **Qwen3.5-9B** at **00:10 SGT** when a new ready dataset is available. Train the grading adapter first, then the feedback adapter; publish both to Hugging Face as one run. Only grading has evaluation metrics. An instructor explicitly deploys the pair.
 
 ## Workflow
 
@@ -13,21 +13,23 @@ flowchart TD
     Decision -->|"Training complete; publication incomplete"| Publish
     Decision -->|"New checksum"| Start["Claim S3 lock · start GPU EC2 · wait for SSM"]
     Start --> Train["Download CSV · validate · QLoRA train · evaluate"]
-    Train --> Save["Save adapter, metrics and configuration to S3"]
+    Train --> Feedback["Fresh process: train feedback adapter<br/>Same dataset and question split · no evaluation metrics"]
+    Feedback --> Save["Save both adapters and configurations to S3<br/>Final manifest only after both complete"]
     Save --> Stop["Confirm GPU stopped · release lock"]
-    Stop --> Publish["Backend CPU host uploads candidate to Hugging Face<br/>SmuFypTeam5/GradingQlora · candidate-RUN_ID"]
+    Stop --> Publish["Backend CPU host uploads both candidate branches<br/>GradingQlora + feedback · candidate-RUN_ID"]
     Publish --> Callback["Authenticated POST /api/v1/training-runs<br/>Save exact HF commit and metrics in PostgreSQL"]
     Publish -.->|"Upload or callback fails"| Retry["Retry publication from saved artifacts<br/>No GPU retraining"]
     Retry -.-> Publish
     Callback --> Review["Instructor reviews metrics in Trained models"]
     Review --> Deploy{"Instructor requests deployment?"}
     Deploy -->|No| Keep["Keep current model"]
-    Deploy -->|Yes| Verify["Download pinned HF commit<br/>Check adapter files, base model, rank and grading responses"]
+    Deploy -->|Yes| Verify["Download both pinned HF commits<br/>Check adapter files, base model, rank and responses"]
     Verify --> Passed{"Checks pass?"}
     Passed -->|Yes| Activate["Activate candidate for new rubric submissions"]
     Passed -->|No| Keep
     Start -.->|Failure| Cleanup["Stop GPU · retain lock until stopped · record failure"]
     Train -.->|Failure| Cleanup
+    Feedback -.->|Failure| Cleanup
     Save -.->|Failure| Cleanup
     Stop -.->|Failure| Cleanup
     Recovery["Terminal execution events + 15-minute watchdog"] -.-> Cleanup
@@ -36,18 +38,37 @@ flowchart TD
 
 Step Functions handles waits; Lambda performs short coordination calls. S3 conditional writes prevent overlapping GPU runs. HF upload starts after GPU shutdown. Only an acknowledged backend callback marks the checksum published.
 
-Candidates include dataset identity, configuration, baseline/candidate metrics and an exact HF commit. Publishing never changes the active model. Accepted grading jobs keep their saved model; few-shot grading uses the original configured model.
+Candidates include dataset identity, grading metrics, both configurations and exact HF commits for both adapters. They appear together in one Trained Models card. Feedback has no generated evaluation metrics; validation loss is used internally to select its checkpoint. Publishing never changes the active models. Accepted grading jobs keep both pinned models; few-shot grading uses the original configured model.
+
+`run_training.sh` validates feedback targets before GPU training, runs `train.py`
+with `--grading-only`, then runs `train_feedback.py` in a separate process. The
+grading manifest stays at `grading/result.json` until feedback finishes. A failed
+feedback stage cannot register a partial pair. Publication retries reconcile each
+HF branch independently; a grading upload need not repeat if the feedback upload
+failed. Both uploads must finish before the single backend callback is sent.
+
+Feedback follows `feedback/qlora_feedback_qwen3.5-9B.ipynb`: NF4 QLoRA rank 16 /
+alpha 32, learning rate 1e-4, up to three epochs, assistant-completion loss, and
+the same MET/NOT MET prompt. For the 24-GiB training GPU, batch 1 with accumulation
+16 preserves the notebook's effective batch size 16. Both adapters use the exact
+same base-model revision and seed-42 question split. Empty feedback targets are
+excluded after splitting; training and validation must each retain a target.
+Test questions remain held out and are not evaluated for feedback.
 
 ## Setup
 
-`SmuFypTeam5/GradingQlora` is public. Reads and downloads are anonymous; only branch creation and uploads use the HF token stored in SSM.
+The candidate repositories default to `SmuFypTeam5/GradingQlora` and
+`SmuFypTeam5/feedback`. Each receives a separate `candidate-RUN_ID` branch; neither
+repository's main branch is updated. Candidate reads and downloads are anonymous,
+so both repositories need public read access. Only branch creation and uploads
+use the HF token stored in SSM.
 
 1. Deploy the updated backend/frontend and ensure the backend and SeaweedFS are running and the serving host is SSM-ready.
 2. Create these **SSM SecureString** parameters in the deployment region:
 
    | Parameter | Value |
    | --- | --- |
-   | `/fyp/training/hf-token` | Token with write access to `SmuFypTeam5/GradingQlora` |
+   | `/fyp/training/hf-token` | Token with write access to both `SmuFypTeam5/GradingQlora` and `SmuFypTeam5/feedback` |
    | `/fyp/training/callback-token` | Random machine credential matching backend `TRAINING_CALLBACK_TOKEN` |
 
 3. Set the backend `.env` values below, then rebuild/restart its Compose service:
@@ -56,6 +77,7 @@ Candidates include dataset identity, configuration, baseline/candidate metrics a
    TRAINING_CALLBACK_TOKEN=<same callback credential>
    TRAINING_STATE_MACHINE_ARN=<autotraining_state_machine_arn Terraform output>
    TRAINING_HF_REPO=SmuFypTeam5/GradingQlora
+   TRAINING_FEEDBACK_HF_REPO=SmuFypTeam5/feedback
    MODEL_ADAPTER_DIRECTORY=/mnt/llm-data/adapters
    ```
 
@@ -77,8 +99,9 @@ output format. Feedback uses the reference training prompt with both `[MET]`
 and `[NOT MET]` points, and returns plain text. If the feedback repository is
 private, provide Hugging Face read access to the vLLM service or set
 `FEEDBACK_LORA_PATH` to an already downloaded adapter directory. Never commit
-the access token. The grading candidate registry continues downloading its
-public adapters anonymously and does not deploy feedback adapters.
+the access token. The candidate registry downloads both candidate adapters
+anonymously, checks their responses, and switches the active pair only after
+all checks pass. Older grading-only runs retain their original feedback model.
 
 Serving reads its HF token from the existing SSM SecureString named by
 `vllm_hf_token_parameter` (default `/fyp/training/hf-token`). Terraform grants the
@@ -138,7 +161,7 @@ Run `terraform plan -out=enable.tfplan`, review it, then `terraform apply enable
 - **Instance:** a dedicated training EC2 instance inherits the serving instance type (`g5.xlarge` currently). Leave `autotraining_instance_type` unset or `null` to keep them matched; an explicit value overrides this default. Training remains isolated from the serving instance.
 - **SSH:** while the trainer is running, select it in the EC2 console, choose **Connect → EC2 Instance Connect**, use its public IPv4 address, and sign in as `ubuntu`. Port 22 accepts the region's AWS-managed EC2 Instance Connect prefix list. The console identity needs permission to use Instance Connect. SSM remains available for training commands and diagnostics.
 - **QLoRA:** rank 48 / alpha 96, NF4 4-bit with double quantization, learning rate 5e-5, up to three epochs, batch 1 × accumulation 8, 4,096-token limit and an 80/10/10 question-group split. See [train.py](train.py) and [requirements.txt](requirements.txt).
-- **CSV:** accepts the backend's nine-column rubric schema with trailing `feedback`, plus legacy eight-column datasets. Feedback text is retained during normalization; this runner trains only the grading adapter and does not use feedback as a grading input or target. Partial-credit rows and missing desired answers are excluded and counted; at least one compatible row is required. Fewer than ten unique questions reuse training data for validation and evaluation, recorded as `held_out_evaluation=false` and `split_strategy=reuse_training_data` in the saved configuration. Larger datasets retain the grouped 80/10/10 split.
+- **CSV:** accepts the backend's nine-column rubric schema with trailing `feedback`, plus legacy eight-column datasets. The grading stage ignores feedback text; the feedback stage uses nonempty saved explanations as completion targets. Paired training requires feedback targets in both its training and validation question groups. Partial-credit rows and missing desired answers are excluded and counted; at least one compatible row is required. Fewer than ten unique questions reuse training data for validation and evaluation, recorded as `held_out_evaluation=false` and `split_strategy=reuse_training_data` in the grading configuration. Larger datasets retain the grouped 80/10/10 split.
 - **Recovery:** training has a 12-hour SSM timeout. Terminal events and a 15-minute watchdog clean up failed/abandoned executions; the watchdog stops GPU runs older than 14 hours.
 - **Publication failure:** the message `HF publication/backend notification failed; retry without retraining` means the workflow reached the final `PublicationStatus` step and that SSM command did not succeed, so the evaluated adapter is on the GPU host and in S3 but no backend candidate exists. The backend registers candidates only from this notification, so nothing new appears on **Trained models**. Read the `StandardErrorContent` of that command (`aws ssm get-command-invocation --instance-id <backend-host> --command-id <id>`) and compare the callback's HTTP status with the table in [backend/README.md](../../backend/README.md): 404 means the backend image predates `POST /api/v1/training-runs` and must be rebuilt, 401 means the backend `TRAINING_CALLBACK_TOKEN` no longer matches the SSM value, 409 means the manifest changed for that run id, and a timeout means the private callback URL was unreachable. Retrying the execution never retrains; it repeats only publication and notification.
 - **Local storage:** the trainer retains its encrypted 200 GiB gp3 EBS root volume when using `g5.xlarge`. `/opt/fyp-autotraining` contains the dataset, model checkout, virtual environment, managed Python, HF/package caches and checkpoints. The run script checks for at least 60 GiB free before downloads (`FYP_TRAINING_MIN_FREE_GIB` can override this budget), prints the actual workspace filesystem, and cleans each run's temporary files and output directory on exit. Completed-run markers and caches remain on EBS across nightly stops. It does not depend on or format the DLAMI NVMe instance store. `FYP_TRAINING_WORK_DIRECTORY` can override the workspace path; use persistent storage if overriding it.

@@ -117,6 +117,22 @@ def finish(job):
         raise ValueError("Candidate has no valid evaluation metrics or configuration")
     for name in ("adapter_config.json", "adapter_model.safetensors"):
         S3.head_object(Bucket=BUCKET, Key=f"{prefix}/adapter/{name}")
+    feedback = result.get("feedback")
+    if result.get("feedback_required") and not feedback:
+        raise ValueError("Paired candidate is missing completed feedback training")
+    if feedback:
+        if feedback.get(
+            "adapter_uri"
+        ) != f"s3://{BUCKET}/{prefix}/feedback/adapter/" or not feedback.get(
+            "configuration"
+        ):
+            raise ValueError("Feedback candidate identity or configuration is invalid")
+        for name in (
+            "adapter_config.json",
+            "adapter_model.safetensors",
+            "training_configuration.json",
+        ):
+            S3.head_object(Bucket=BUCKET, Key=f"{prefix}/feedback/adapter/{name}")
     marker = {
         "checksum": checksum,
         "version_id": job["version_id"],
@@ -193,6 +209,7 @@ def publish(job):
         os.environ["HF_TOKEN_PARAMETER"],
         os.environ["CALLBACK_TOKEN_PARAMETER"],
         os.environ["CALLBACK_URL"],
+        os.environ.get("FEEDBACK_HF_REPO", "SmuFypTeam5/feedback"),
     ]
     command_id = send(
         os.environ["BACKEND_INSTANCE_ID"],

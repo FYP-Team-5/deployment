@@ -123,7 +123,9 @@ class DatasetTests(unittest.TestCase):
             with source.open(encoding="utf-8-sig", newline="") as stream:
                 rows = list(csv.DictReader(stream))
             for row in rows:
-                row["feedback"] = 'Keep this explanation, including "quotes".\nNext line.'
+                row["feedback"] = (
+                    'Keep this explanation, including "quotes".\nNext line.'
+                )
             with source.open("w", newline="") as stream:
                 writer = csv.DictWriter(stream, fieldnames=[*FIELDS, "feedback"])
                 writer.writeheader()
@@ -273,6 +275,7 @@ class RunnerTests(unittest.TestCase):
             notebook.write_text(json.dumps({"cells": cells}))
             args = SimpleNamespace(
                 dataset=str(source),
+                grading_only=row_count == 10,
                 checksum=hashlib.sha256(source.read_bytes()).hexdigest(),
                 notebook=str(notebook),
                 output=str(Path(folder) / "output"),
@@ -295,6 +298,12 @@ class RunnerTests(unittest.TestCase):
                 train.run(args)
             api_factory.assert_called_once_with(token=False)
             manifest = json.loads(s3.put_object.call_args.kwargs["Body"])
+            self.assertEqual(manifest["feedback_required"], row_count == 10)
+            self.assertTrue(
+                s3.put_object.call_args.kwargs["Key"].endswith(
+                    "/grading/result.json" if row_count == 10 else "/result.json"
+                )
+            )
             self.assertEqual(manifest["run_id"], JOB["run_id"])
             self.assertEqual(manifest["configuration"]["LORA_R"], 48)
             self.assertEqual(manifest["configuration"]["LORA_ALPHA"], 96)
@@ -334,6 +343,35 @@ class CoordinatorTests(unittest.TestCase):
         for active in self.patches:
             active.start()
             self.addCleanup(active.stop)
+
+    def test_paired_completion_checks_feedback_files_before_recording_success(self):
+        self.db.items["lock"] = dict(JOB)
+        prefix = f"candidates/{JOB['checksum']}/{JOB['run_id']}"
+        manifest = {
+            "status": "completed",
+            "dataset_checksum": JOB["checksum"],
+            "dataset_version": JOB["version_id"],
+            "run_id": JOB["run_id"],
+            "adapter_uri": f"s3://{execution.BUCKET}/{prefix}/adapter/",
+            "configuration": {"LORA_R": 48},
+            "metrics": {"valid_examples": 1, "final_score_mae": 0},
+            "feedback_required": True,
+        }
+        with (
+            patch.object(execution, "read_manifest", return_value=manifest),
+            patch.object(execution, "S3") as s3,
+        ):
+            with self.assertRaisesRegex(ValueError, "missing completed feedback"):
+                execution.finish(JOB)
+            self.assertNotIn("trained/" + JOB["checksum"], self.db.items)
+            manifest["feedback"] = {
+                "adapter_uri": f"s3://{execution.BUCKET}/{prefix}/feedback/adapter/",
+                "configuration": {"LORA_R": 16},
+            }
+            s3.reset_mock()
+            execution.finish(JOB)
+            self.assertEqual(s3.head_object.call_count, 5)
+        self.assertIn("trained/" + JOB["checksum"], self.db.items)
 
     def prepare(self):
         with patch.object(transfer, "snapshot", return_value=dict(JOB)):
