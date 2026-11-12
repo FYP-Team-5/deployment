@@ -1,6 +1,6 @@
 # Nightly retraining
 
-Retrain **Qwen3.5-9B** at **00:10 SGT** when a new ready dataset is available. Train the grading adapter first, then the feedback adapter; publish both to Hugging Face as one run. Only grading has evaluation metrics. An instructor explicitly deploys the pair.
+Retrain **Qwen3.5-9B** at **00:10 SGT** when a new ready dataset is available. Train the grading adapter first, then the feedback adapter; publish both to Hugging Face as one run. Only grading has evaluation metrics. An instructor deploys the grading and feedback models separately.
 
 ## Workflow
 
@@ -21,11 +21,11 @@ flowchart TD
     Publish -.->|"Upload or callback fails"| Retry["Retry publication from saved artifacts<br/>No GPU retraining"]
     Retry -.-> Publish
     Callback --> Review["Instructor reviews metrics in Trained models"]
-    Review --> Deploy{"Instructor requests deployment?"}
+    Review --> Deploy{"Instructor deploys grading or feedback model?"}
     Deploy -->|No| Keep["Keep current model"]
-    Deploy -->|Yes| Verify["Download both pinned HF commits<br/>Check adapter files, base model, rank and responses"]
+    Deploy -->|Yes| Verify["Download that model's pinned HF commit<br/>Check adapter files, base model, rank and responses"]
     Verify --> Passed{"Checks pass?"}
-    Passed -->|Yes| Activate["Activate candidate for new rubric submissions"]
+    Passed -->|Yes| Activate["Activate that model for new rubric submissions<br/>The other model stays unchanged"]
     Passed -->|No| Keep
     Start -.->|Failure| Cleanup["Stop GPU · retain lock until stopped · record failure"]
     Train -.->|Failure| Cleanup
@@ -38,7 +38,7 @@ flowchart TD
 
 Step Functions handles waits; Lambda performs short coordination calls. S3 conditional writes prevent overlapping GPU runs. HF upload starts after GPU shutdown. Only an acknowledged backend callback marks the checksum published.
 
-Candidates include dataset identity, grading metrics, both configurations and exact HF commits for both adapters. They appear together in one Trained Models card. Feedback has no generated evaluation metrics; validation loss is used internally to select its checkpoint. Publishing never changes the active models. Accepted grading jobs keep both pinned models; few-shot grading uses the original configured model.
+Candidates include dataset identity, grading metrics, both configurations and exact HF commits for both adapters. They appear together in one Trained Models card, where each model has its own deploy button and status. Feedback has no generated evaluation metrics; validation loss is used internally to select its checkpoint. Publishing never changes the active models. Accepted grading jobs keep both pinned models; few-shot grading uses the original configured model.
 
 `run_training.sh` validates feedback targets before GPU training, runs `train.py`
 with `--grading-only`, then runs `train_feedback.py` in a separate process. The
@@ -131,9 +131,11 @@ output format. Feedback uses the reference training prompt with both `[MET]`
 and `[NOT MET]` points, and returns plain text. If the feedback repository is
 private, provide Hugging Face read access to the vLLM service or set
 `FEEDBACK_LORA_PATH` to an already downloaded adapter directory. Never commit
-the access token. The candidate registry downloads both candidate adapters
-anonymously, checks their responses, and switches the active pair only after
-all checks pass. Older grading-only runs retain their original feedback model.
+the access token. The candidate registry downloads the requested candidate
+adapter anonymously, checks its responses, and switches only that model after
+its checks pass. The active grading and feedback adapters may come from
+different runs. Deploying an older grading-only run leaves the active feedback
+model unchanged.
 
 Serving reads its HF token from the existing SSM SecureString named by
 `vllm_hf_token_parameter` (default `/fyp/training/hf-token`). Terraform grants the
