@@ -42,6 +42,18 @@ resource "aws_s3_bucket_versioning" "autotraining" {
   versioning_configuration { status = "Enabled" }
 }
 
+# S3 can return NoSuchKey for new objects while first-time versioning propagates.
+# AWS recommends waiting 15 minutes before writes. Repeat only when versioning
+# is created/reconfigured, including bucket replacement, not on script updates.
+resource "time_sleep" "autotraining_versioning" {
+  depends_on      = [aws_s3_bucket_versioning.autotraining]
+  create_duration = "15m"
+
+  lifecycle {
+    replace_triggered_by = [aws_s3_bucket_versioning.autotraining]
+  }
+}
+
 locals {
   autotraining_scripts = {
     "export_backend.sh" = "autotraining/export_backend.sh"
@@ -60,6 +72,8 @@ resource "aws_s3_object" "autotraining_scripts" {
   source                 = "${path.module}/${each.value}"
   etag                   = filemd5("${path.module}/${each.value}")
   server_side_encryption = "AES256"
+
+  depends_on = [time_sleep.autotraining_versioning]
 }
 
 # Adds narrowly scoped S3 permissions to the EXISTING serving role.

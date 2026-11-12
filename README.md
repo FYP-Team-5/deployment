@@ -44,6 +44,12 @@ terraform output
 
 Review the plan before applying. Replacing `aws_instance.llm` deletes its instance-local application data. Do not apply while training is running.
 
+Fresh stacks wait 15 minutes after enabling S3 versioning before uploading
+training scripts, following AWS's propagation guidance. This prevents temporary
+`GetObjectTagging: NoSuchKey` failures during initial upload. The wait repeats
+when the versioning resource is replaced or reconfigured, including bucket
+replacement; ordinary script updates do not repeat it.
+
 After startup:
 
 - Frontend: `http://<public_ip>:3000`
