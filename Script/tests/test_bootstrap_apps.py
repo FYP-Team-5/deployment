@@ -25,11 +25,24 @@ class AppBootstrapTests(unittest.TestCase):
             (target / ".env.example").touch()
         self.script = self.directory / "bootstrap_apps.sh"
         self.script.write_text(
-            (ROOT / "bootstrap_apps.sh").read_text().replace("/opt/fyp", str(self.apps))
+            (ROOT / "bootstrap_apps.sh")
+            .read_text()
+            .replace("/opt/fyp", str(self.apps))
+            .replace("/mnt/llm-data/adapters", str(self.directory / "adapters"))
         )
         shutil.copy(ROOT / "configure_training_callback.py", self.directory)
         self.stub("curl", "print('192.0.2.10')")
         self.stub("openssl", "import sys\nprint('0' * (int(sys.argv[-1]) * 2))")
+        self.stub("id", "print('1000')")
+        # Model the Ubuntu ownership lookup without requiring that account locally.
+        self.stub(
+            "install",
+            "import os, sys\nfrom pathlib import Path\n"
+            "args = sys.argv[1:]\n"
+            "target = Path(args[-1])\n"
+            "target.mkdir(parents=True, exist_ok=True)\n"
+            "target.chmod(int(args[args.index('-m') + 1], 8))",
+        )
         self.stub(
             "aws",
             "import json, os, sys\n"
@@ -74,6 +87,8 @@ class AppBootstrapTests(unittest.TestCase):
         backend = (self.apps / "backend/.env").read_text()
         self.assertIn("TRAINING_STATE_MACHINE_ARN=" + WORKFLOW, backend)
         self.assertIn('TRAINING_CALLBACK_TOKEN="fixture-callback"', backend)
+        self.assertIn("MODEL_ADAPTER_GID=1000", backend)
+        self.assertEqual((self.directory / "adapters").stat().st_mode & 0o777, 0o775)
         calls = self.calls.read_text().splitlines()
         self.assertEqual(len(calls), 2)
         self.assertIn(str(self.apps / "backend"), calls[0])

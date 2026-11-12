@@ -116,6 +116,14 @@ use the HF token stored in SSM.
 
 Keep vLLM port 8000 private. The adapter directory must use the same path in the backend container and serving host.
 
+The API downloads candidate adapters as an unprivileged container user. Bootstrap
+sets the shared directory to mode `2775` and passes the host user's group as
+`MODEL_ADAPTER_GID`; Compose adds this supplementary group to the API. This lets
+the API write adapters and vLLM read them. For an existing host, set the directory's
+group to the vLLM user's group, apply mode `2775`, set `MODEL_ADAPTER_GID` in the
+backend `.env` to that group's numeric id, and recreate the API container with
+the updated Compose file.
+
 The serving wrapper also loads `SmuFypTeam5/feedback` as
 `qwen35-9b-feedback-qlora`. Backend `LLM_FEEDBACK_MODEL` must match this alias;
 `LLM_GRADING_CONTRACT=criteria_array_v1` selects the grading adapter's binary

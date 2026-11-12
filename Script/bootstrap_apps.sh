@@ -55,6 +55,12 @@ set_env "$backend_env" LLM_GRADING_CONTRACT "criteria_array_v1"
 set_env "$backend_env" LLM_FEEDBACK_MODEL "qwen35-9b-feedback-qlora"
 set_env "$backend_env" TRAINING_STATE_MACHINE_ARN "$TRAINING_STATE_MACHINE_ARN"
 
+# The unprivileged API downloads adapters; vLLM reads them as the host user.
+# Share only this directory through the host user's group, with group inheritance.
+adapter_group_id="$(id -g ubuntu)"
+install -d -o ubuntu -g "$adapter_group_id" -m 2775 /mnt/llm-data/adapters
+set_env "$backend_env" MODEL_ADAPTER_GID "$adapter_group_id"
+
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 python3 "$script_directory/configure_training_callback.py" \
     --env-file "$backend_env" \
