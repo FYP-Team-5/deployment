@@ -57,6 +57,28 @@ Training and candidate deployment remain separate instructor actions.
 
 Bootstrap package installations wait up to ten minutes for unattended upgrades
 to release the dpkg lock, including the CloudWatch agent package installation.
+Training-host dependency installs and the SSM export/launch setup use the same
+ten-minute lock wait. The export command and workflow polling budgets include
+time for that wait, command delivery and the export itself.
+Background upgrades can also reexecute systemd while vLLM starts. Bootstrap
+retries temporary systemd connection failures up to six times, five seconds apart,
+and confirms the service is active after its readiness check before starting
+the backend/frontend. Other service failures stop bootstrap immediately.
+CloudWatch is restarted and checked after vLLM is ready so its journal reader
+reattaches after any systemd/journald upgrade during startup.
+
+`Script/bootstrap_apps.sh` is the shared application bootstrap for Terraform and
+standalone setup. Terraform installs this exact script and creates
+`/usr/local/sbin/bootstrap-fyp-apps` to supply the workflow ARN, callback parameter
+and AWS region. Standalone setup requires `TRAINING_STATE_MACHINE_ARN` before it
+changes application files, for example:
+
+```bash
+sudo env TRAINING_STATE_MACHINE_ARN='<autotraining_state_machine_arn output>' \
+  AWS_REGION=us-east-1 \
+  TRAINING_CALLBACK_TOKEN_PARAMETER=/fyp/training/callback-token \
+  bash Script/bootstrap_apps.sh
+```
 
 ## Grading and feedback on one vLLM instance
 

@@ -3,6 +3,10 @@ set -Eeuo pipefail
 
 # Bootstraps the two public FYP repositories on an Ubuntu EC2 instance.
 # Run as root after Docker Engine and the vLLM service have been started.
+if [[ -z "${TRAINING_STATE_MACHINE_ARN:-}" ]]; then
+    echo "ERROR: Set TRAINING_STATE_MACHINE_ARN to the deployed training workflow ARN." >&2
+    exit 2
+fi
 umask 077
 install -d -m 0755 /opt/fyp
 
@@ -26,7 +30,7 @@ set_env() {
     fi
 }
 
-# EC2 requires IMDSv2 and assigns a public IP to this instance.
+# Read the associated Elastic IP from IMDSv2 (no auto-assigned public IPv4).
 token="$(curl --fail --silent --show-error --retry 4 \
     --request PUT http://169.254.169.254/latest/api/token \
     --header 'X-aws-ec2-metadata-token-ttl-seconds: 60')"
@@ -49,6 +53,7 @@ set_env "$backend_env" LLM_URL "http://host.docker.internal:8000/v1/chat/complet
 set_env "$backend_env" LLM_MODEL "qwen35-9b-grading-qlora"
 set_env "$backend_env" LLM_GRADING_CONTRACT "criteria_array_v1"
 set_env "$backend_env" LLM_FEEDBACK_MODEL "qwen35-9b-feedback-qlora"
+set_env "$backend_env" TRAINING_STATE_MACHINE_ARN "$TRAINING_STATE_MACHINE_ARN"
 
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 python3 "$script_directory/configure_training_callback.py" \

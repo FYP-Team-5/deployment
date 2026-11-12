@@ -177,6 +177,8 @@ resource "aws_instance" "llm" {
     requirements                      = base64gzip(file("${path.module}/Script/requirements-vllm.txt"))
     readiness_script                  = base64gzip(file("${path.module}/Script/check_vllm_ready.py"))
     callback_script                   = base64gzip(file("${path.module}/Script/configure_training_callback.py"))
+    bootstrap_script                  = base64gzip(file("${path.module}/Script/bootstrap_apps.sh"))
+    systemctl_retry_script            = file("${path.module}/Script/systemctl_retry.sh")
     aws_region                        = var.aws_region
     cloud_init_log_group              = aws_cloudwatch_log_group.cloud_init.name
     vllm_log_group                    = aws_cloudwatch_log_group.vllm.name

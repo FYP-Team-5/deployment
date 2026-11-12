@@ -57,7 +57,8 @@ command -v nvidia-smi >/dev/null
 nvidia-smi
 if ! command -v aws >/dev/null || ! command -v gcc >/dev/null || ! command -v git >/dev/null || ! command -v curl >/dev/null; then
     apt-get update
-    apt-get install -y awscli build-essential git curl ca-certificates
+    # First-boot unattended upgrades may still hold dpkg's lock.
+    apt-get -o DPkg::Lock::Timeout=600 install -y awscli build-essential git curl ca-certificates
 fi
 command -v python3 >/dev/null
 

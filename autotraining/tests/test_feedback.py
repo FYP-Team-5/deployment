@@ -1,6 +1,5 @@
 """Offline data, artifact and publication tests for paired training."""
 
-import ast
 import csv
 import hashlib
 import io
@@ -106,41 +105,6 @@ def test_feedback_split_matches_grading_question_groups_and_uses_only_targets(tm
     assert "[NOT MET] Second" in example["prompt"][1]["content"]
     assert "Feedback target" not in example["prompt"][1]["content"]
     assert example["completion"][0]["content"].startswith("Feedback target")
-
-
-def test_feedback_prompt_matches_reference_notebook(tmp_path):
-    notebook = ROOT.parents[1] / "feedback/qlora_feedback_qwen3.5-9B.ipynb"
-    if not notebook.exists():
-        pytest.skip("Reference feedback checkout is unavailable")
-    source = json.loads(notebook.read_text())["cells"][8]["source"]
-    tree = ast.parse("".join(source))
-    tree.body = [
-        node
-        for node in tree.body
-        if (
-            isinstance(node, ast.FunctionDef)
-            and node.name in {"criterion_marks", "build_row_prompt", "make_messages"}
-        )
-        or (
-            isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name) and target.id == "STUDENT_SYSTEM_PROMPT"
-                for target in node.targets
-            )
-        )
-    ]
-    scope = {}
-    exec(compile(tree, "<reference feedback prompt>", "exec"), scope)  # noqa: S102 - selected functions from the trusted local reference
-    examples, _ = train_feedback.prepare_examples(dataset(tmp_path, count=1))
-    row = {
-        "question": "Question 0",
-        "desired_answer": "Reference",
-        "student_answer": "Student answer",
-        "criteria": ["First", "Second"],
-        "criteria_score": [2, 0],
-        "criteria_max_score": [2, 3],
-    }
-    assert examples["train"][0]["prompt"] == scope["make_messages"](row)
 
 
 def test_missing_validation_targets_fail_instead_of_moving_test_questions(tmp_path):

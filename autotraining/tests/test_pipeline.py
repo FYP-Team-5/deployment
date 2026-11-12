@@ -788,6 +788,17 @@ class PublicationTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_export_timeouts_allow_package_lock_wait_and_command_delivery(self):
+        machine = json.loads((ROOT / "workflow.asl.json.tftpl").read_text())
+        with patch.object(transfer, "send", return_value="command") as send:
+            transfer.start_snapshot()
+        command_timeout = send.call_args.args[2]
+        self.assertGreaterEqual(command_timeout, 600 + 360)
+        states = machine["States"]
+        attempts = states["ExportReady"]["Choices"][1]["NumericGreaterThanEquals"]
+        poll_budget = attempts * states["WaitExport"]["Seconds"]
+        self.assertGreater(poll_budget, command_timeout + 120)
+
     def test_state_graph_and_cleanup_paths(self):
         machine = json.loads((ROOT / "workflow.asl.json.tftpl").read_text())
         states = machine["States"]

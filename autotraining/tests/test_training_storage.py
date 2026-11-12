@@ -27,6 +27,9 @@ if command == "df":
     print("/dev/test-ebs 209715200 1048576 " + os.environ["TEST_FREE_KIB"] + " 1% /")
 elif command == "aws":
     Path(args[3]).write_text("test download")
+elif command == "apt-get" and "install" in args:
+    if "DPkg::Lock::Timeout=600" not in args:
+        sys.exit("dpkg lock is held; no wait was requested")
 elif command == "python" and "--prepare-only" in args:
     sys.exit(int(os.environ.get("TEST_PREPARE_EXIT", "0")))
 elif command == "python" and ("train.py" in args or "train_feedback.py" in args) and "--prepare-only" not in args:
@@ -156,6 +159,20 @@ class TrainingStorageTests(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertTrue(cached.exists())
         self.assertEqual(len(self.train_log.read_text().splitlines()), 2)
+
+    def test_first_boot_package_install_waits_for_the_dpkg_lock(self):
+        self.make_stub(self.bin / "apt-get")
+        startup = self.directory / "bash-startup"
+        startup.write_text(
+            "command() {\n"
+            '    if [[ "$*" == "-v gcc" ]]; then return 1; fi\n'
+            '    builtin command "$@"\n'
+            "}\n"
+        )
+        result = self.run_training(BASH_ENV=str(startup))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.command_log.read_text().splitlines().count("apt-get"), 2)
+        self.assertTrue((self.work / f"completed-{RUN_ID}").is_file())
 
     def test_feedback_failure_does_not_mark_the_pair_completed(self):
         result = self.run_training(TEST_FEEDBACK_EXIT="1")

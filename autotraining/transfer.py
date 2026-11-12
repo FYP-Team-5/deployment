@@ -47,11 +47,12 @@ def start_snapshot():
         [
             "set -e",
             "umask 077",
-            "command -v aws >/dev/null || (apt-get update && apt-get install -y awscli)",
+            "command -v aws >/dev/null || (apt-get update && apt-get -o DPkg::Lock::Timeout=600 install -y awscli)",
             f"aws s3 cp s3://{BUCKET}/scripts/export_backend.sh /tmp/fyp-export.sh >/dev/null",
             f"bash /tmp/fyp-export.sh {BUCKET} {REGION}",
         ],
-        360,
+        # Allow the ten-minute package-lock wait plus the export's six minutes.
+        960,
     )
     return {"command_id": command_id}
 

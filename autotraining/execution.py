@@ -65,7 +65,7 @@ def launch(job, attempt=0):
         [
             "set -e",
             "umask 077",
-            "command -v aws >/dev/null || (apt-get update && apt-get install -y awscli)",
+            "command -v aws >/dev/null || (apt-get update && apt-get -o DPkg::Lock::Timeout=600 install -y awscli)",
             "mkdir -p /opt/fyp-autotraining",
             f"aws s3 cp s3://{BUCKET}/scripts/run_training.sh /opt/fyp-autotraining/run_training.sh >/dev/null",
             f"bash /opt/fyp-autotraining/run_training.sh {BUCKET} {REGION} {checksum} {version_id} {job['run_id']}",
