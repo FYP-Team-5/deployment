@@ -21,7 +21,8 @@ done
 [[ -n "$eip" ]] || { echo "ERROR: Elastic IP association not visible in EC2 metadata" >&2; exit 1; }
 
 apt-get update
-apt-get install -y python3-venv ca-certificates curl git openssl e2fsprogs util-linux awscli
+# First-boot unattended upgrades can hold dpkg's lock; wait up to ten minutes.
+apt-get -o DPkg::Lock::Timeout=600 install -y python3-venv ca-certificates curl git openssl e2fsprogs util-linux awscli
 
 # Start CloudWatch collection before the long Docker and vLLM setup.
 # Terraform manages the destination log groups and their 7-day retention.
@@ -29,7 +30,7 @@ cw_agent_deb="$(mktemp --suffix=.deb)"
 curl -fSL --retry 5 \
   "https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb" \
   -o "$cw_agent_deb"
-dpkg -i "$cw_agent_deb"
+apt-get -o DPkg::Lock::Timeout=600 install -y "$cw_agent_deb"
 rm -f "$cw_agent_deb"
 
 mkdir -p /opt/aws/amazon-cloudwatch-agent/etc

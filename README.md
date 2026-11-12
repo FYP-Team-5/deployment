@@ -55,6 +55,9 @@ Terraform finishes creating EC2 before cloud-init finishes: use
 `sudo cloud-init status --wait` on the host to confirm bootstrap completion.
 Training and candidate deployment remain separate instructor actions.
 
+Bootstrap package installations wait up to ten minutes for unattended upgrades
+to release the dpkg lock, including the CloudWatch agent package installation.
+
 ## Grading and feedback on one vLLM instance
 
 The serving wrapper loads `Qwen/Qwen3.5-9B` once and registers two LoRA adapters:
