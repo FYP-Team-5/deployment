@@ -7,6 +7,7 @@
       "Resource": "${lambda_arn}",
       "Parameters": {
         "action": "prepare",
+        "request.$": "$.request",
         "execution_id.$": "$.execution_id",
         "command_id.$": "$.export.command_id"
       },
@@ -136,6 +137,7 @@
       "Parameters": {
         "job.$": "$.job",
         "attempt.$": "$.launch.attempt",
+        "request.$": "$.request",
         "execution_id.$": "$.execution_id"
       },
       "Next": "WaitBoot"
@@ -293,6 +295,7 @@
     "Initialize": {
       "Type": "Pass",
       "Parameters": {
+        "request.$": "$",
         "execution_id.$": "$$.Execution.Id"
       },
       "Next": "Snapshot"
@@ -345,7 +348,7 @@
         },
         {
           "Variable": "$.export_attempt",
-          "NumericGreaterThanEquals": 32,
+          "NumericGreaterThanEquals": 80,
           "Next": "ExportTimeout"
         }
       ],
@@ -354,6 +357,7 @@
     "NextExportAttempt": {
       "Type": "Pass",
       "Parameters": {
+        "request.$": "$.request",
         "execution_id.$": "$.execution_id",
         "export.$": "$.export",
         "export_attempt.$": "States.MathAdd($.export_attempt, 1)"

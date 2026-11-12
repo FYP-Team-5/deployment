@@ -13,9 +13,21 @@ resource "aws_vpc" "llm" {
 resource "aws_subnet" "llm" {
   vpc_id                  = aws_vpc.llm.id
   cidr_block              = "10.42.1.0/24"
+  availability_zone       = local.selected_availability_zone
   map_public_ip_on_launch = false
 
   tags = { Name = "${var.name}-public" }
+
+  lifecycle {
+    precondition {
+      condition     = length(local.supported_availability_zones) > 0
+      error_message = "No available Availability Zone in ${var.aws_region} supports both ${local.serving_instance_type} and ${local.training_instance_type}. Choose another region or training instance type."
+    }
+    precondition {
+      condition     = var.availability_zone == null ? true : contains(local.supported_availability_zones, var.availability_zone)
+      error_message = "The requested Availability Zone must be available and support both serving and training instance types. Supported zones: ${join(", ", local.supported_availability_zones)}."
+    }
+  }
 }
 
 resource "aws_internet_gateway" "llm" {
@@ -160,7 +172,7 @@ resource "aws_eip" "llm" {
 
 resource "aws_instance" "llm" {
   ami                         = data.aws_ssm_parameter.gpu_ami.value
-  instance_type               = "g5.xlarge"
+  instance_type               = local.serving_instance_type
   subnet_id                   = aws_subnet.llm.id
   vpc_security_group_ids      = [aws_security_group.llm.id]
   iam_instance_profile        = aws_iam_instance_profile.llm.name
@@ -171,13 +183,20 @@ resource "aws_instance" "llm" {
     delete_on_termination = true
   }
 
-  user_data_base64 = base64encode(templatefile("${path.module}/user-data.sh.tftpl", {
-    serve_script         = base64gzip(file("${path.module}/Script/serve_qwen35_vllm.sh"))
-    requirements         = base64gzip(file("${path.module}/Script/requirements-vllm.txt"))
-    aws_region           = var.aws_region
-    cloud_init_log_group = aws_cloudwatch_log_group.cloud_init.name
-    vllm_log_group       = aws_cloudwatch_log_group.vllm.name
-    hf_token_parameter   = var.vllm_hf_token_parameter
+  # cloud-init decompresses the script; keep EC2 user data below its 16 KiB limit.
+  user_data_base64 = base64gzip(templatefile("${path.module}/user-data.sh.tftpl", {
+    serve_script                      = base64gzip(file("${path.module}/Script/serve_qwen35_vllm.sh"))
+    requirements                      = base64gzip(file("${path.module}/Script/requirements-vllm.txt"))
+    readiness_script                  = base64gzip(file("${path.module}/Script/check_vllm_ready.py"))
+    callback_script                   = base64gzip(file("${path.module}/Script/configure_training_callback.py"))
+    bootstrap_script                  = base64gzip(file("${path.module}/Script/bootstrap_apps.sh"))
+    systemctl_retry_script            = file("${path.module}/Script/systemctl_retry.sh")
+    aws_region                        = var.aws_region
+    cloud_init_log_group              = aws_cloudwatch_log_group.cloud_init.name
+    vllm_log_group                    = aws_cloudwatch_log_group.vllm.name
+    hf_token_parameter                = var.vllm_hf_token_parameter
+    training_callback_token_parameter = var.autotraining_callback_token_parameter
+    training_state_machine_arn        = "arn:${data.aws_partition.vllm.partition}:states:${var.aws_region}:${data.aws_caller_identity.vllm.account_id}:stateMachine:${var.name}-nightly-training"
   }))
   user_data_replace_on_change = true
 
@@ -188,7 +207,7 @@ resource "aws_instance" "llm" {
 
   tags = { Name = var.name }
 
-  depends_on = [aws_route_table_association.public, aws_iam_role_policy_attachment.ssm, aws_iam_role_policy.cloudwatch_logs, aws_iam_role_policy.vllm_hf_token]
+  depends_on = [aws_route_table_association.public, aws_iam_role_policy_attachment.ssm, aws_iam_role_policy.cloudwatch_logs, aws_iam_role_policy.vllm_hf_token, aws_iam_role_policy.autotraining_backend_export]
 }
 
 resource "aws_eip_association" "llm" {

@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
+${systemctl_retry_script}
+
 # EC2 starts without an auto-assigned public IPv4 address. Wait for
 # Terraform to associate the EIP so that outbound internet access works.
 # Instance metadata is local and remains accessible without internet.
@@ -21,7 +23,8 @@ done
 [[ -n "$eip" ]] || { echo "ERROR: Elastic IP association not visible in EC2 metadata" >&2; exit 1; }
 
 apt-get update
-apt-get install -y python3-venv ca-certificates curl git openssl e2fsprogs util-linux awscli
+# First-boot unattended upgrades can hold dpkg's lock; wait up to ten minutes.
+apt-get -o DPkg::Lock::Timeout=600 install -y python3-venv ca-certificates curl git openssl e2fsprogs util-linux awscli
 
 # Start CloudWatch collection before the long Docker and vLLM setup.
 # Terraform manages the destination log groups and their 7-day retention.
@@ -29,7 +32,7 @@ cw_agent_deb="$(mktemp --suffix=.deb)"
 curl -fSL --retry 5 \
   "https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb" \
   -o "$cw_agent_deb"
-dpkg -i "$cw_agent_deb"
+apt-get -o DPkg::Lock::Timeout=600 install -y "$cw_agent_deb"
 rm -f "$cw_agent_deb"
 
 mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
@@ -76,7 +79,7 @@ if ! docker compose version >/dev/null 2>&1; then
     exit 1
 fi
 
-systemctl enable --now docker
+systemctl_retry enable --now docker
 if ! docker info >/dev/null 2>&1; then
     echo "ERROR: Docker daemon is not available after startup." >&2
     exit 1
@@ -88,76 +91,21 @@ echo "Reusing AMI Compose: $(docker compose version)"
 install -d -o ubuntu -g ubuntu /opt/qwen-vllm/Script
 echo '${serve_script}' | base64 -d | gzip -d > /opt/qwen-vllm/Script/serve_qwen35_vllm.sh
 echo '${requirements}' | base64 -d | gzip -d > /opt/qwen-vllm/Script/requirements-vllm.txt
+echo '${readiness_script}' | base64 -d | gzip -d > /opt/qwen-vllm/Script/check_vllm_ready.py
+echo '${callback_script}' | base64 -d | gzip -d > /opt/qwen-vllm/Script/configure_training_callback.py
+echo '${bootstrap_script}' | base64 -d | gzip -d > /opt/qwen-vllm/Script/bootstrap_apps.sh
 cat > /usr/local/sbin/bootstrap-fyp-apps <<'FYP_BOOTSTRAP'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Bootstraps the two public FYP repositories on an Ubuntu EC2 instance.
-# Run as root after Docker Engine and the vLLM service have been started.
-umask 077
-install -d -m 0755 /opt/fyp
-
-for project in backend frontend; do
-    target="/opt/fyp/$project"
-    if [[ ! -d "$target/.git" ]]; then
-        git clone --depth 1 "https://github.com/FYP-Team-5/$project.git" "$target"
-    fi
-    if [[ ! -f "$target/.env" ]]; then
-        cp "$target/.env.example" "$target/.env"
-    fi
-    chmod 0600 "$target/.env"
-done
-
-set_env() {
-    local path="$1" name="$2" value="$3"
-    if grep -q "^$name=" "$path"; then
-        sed -i "s|^$name=.*|$name=$value|" "$path"
-    else
-        printf '%s=%s\n' "$name" "$value" >> "$path"
-    fi
-}
-
-# Read the associated Elastic IP from IMDSv2 (no auto-assigned public IPv4).
-token="$(curl --fail --silent --show-error --retry 4 \
-    --request PUT http://169.254.169.254/latest/api/token \
-    --header 'X-aws-ec2-metadata-token-ttl-seconds: 60')"
-public_ip="$(curl --fail --silent --show-error --retry 4 \
-    --header "X-aws-ec2-metadata-token: $token" \
-    http://169.254.169.254/latest/meta-data/public-ipv4)"
-
-backend_env=/opt/fyp/backend/.env
-frontend_env=/opt/fyp/frontend/.env
-
-# Generate unique boot-time secrets; do not store them in Git or Terraform state.
-set_env "$backend_env" POSTGRES_PASSWORD "$(openssl rand -hex 24)"
-set_env "$backend_env" JWT_SECRET "$(openssl rand -hex 32)"
-set_env "$backend_env" STAFF_REGISTRATION_KEY "key"
-api_key="$(openssl rand -hex 32)"
-set_env "$backend_env" API_KEY "$api_key"
-set_env "$backend_env" POSTGRES_PORT "127.0.0.1:5433"
-set_env "$backend_env" CORS_ORIGINS "http://$public_ip:3000"
-set_env "$backend_env" LLM_URL "http://host.docker.internal:8000/v1/chat/completions"
-set_env "$backend_env" LLM_MODEL "qwen35-9b-grading-qlora"
-set_env "$backend_env" LLM_GRADING_CONTRACT "criteria_array_v1"
-set_env "$backend_env" LLM_FEEDBACK_MODEL "qwen35-9b-feedback-qlora"
-
-# NEXT_PUBLIC variables are embedded in the frontend image during the build.
-set_env "$frontend_env" NEXT_PUBLIC_API_URL "http://$public_ip:8002"
-set_env "$frontend_env" NEXT_PUBLIC_GRADING_API_KEY "$api_key"
-set_env "$frontend_env" FRONTEND_BIND_IP "0.0.0.0"
-set_env "$frontend_env" FRONTEND_PORT "3000"
-
-# This is a demo setup: the frontend embeds its API key in public JavaScript.
-# Add an HTTPS proxy and stronger server-side authorization before production.
-docker compose --project-directory /opt/fyp/backend up --build -d
-docker compose --project-directory /opt/fyp/frontend up --build -d
-
-echo "FYP frontend: http://$public_ip:3000"
-echo "FYP backend API: http://$public_ip:8002/health"
+export TRAINING_STATE_MACHINE_ARN="${training_state_machine_arn}"
+export TRAINING_CALLBACK_TOKEN_PARAMETER="${training_callback_token_parameter}"
+export AWS_REGION="${aws_region}"
+exec /opt/qwen-vllm/Script/bootstrap_apps.sh
 FYP_BOOTSTRAP
-chmod 0755 /usr/local/sbin/bootstrap-fyp-apps
+chmod 0755 /usr/local/sbin/bootstrap-fyp-apps /opt/qwen-vllm/Script/bootstrap_apps.sh
 chmod 0755 /opt/qwen-vllm/Script/serve_qwen35_vllm.sh
-chown ubuntu:ubuntu /opt/qwen-vllm/Script/serve_qwen35_vllm.sh /opt/qwen-vllm/Script/requirements-vllm.txt
+chown ubuntu:ubuntu /opt/qwen-vllm/Script/serve_qwen35_vllm.sh /opt/qwen-vllm/Script/requirements-vllm.txt /opt/qwen-vllm/Script/check_vllm_ready.py
 
 cat > /usr/local/sbin/prepare-llm-storage <<'STORAGE'
 #!/usr/bin/env bash
@@ -179,6 +127,7 @@ if ! mountpoint -q "$target_mount"; then
 fi
 
 install -d -o ubuntu -g ubuntu \
+    "$target_mount/adapters" \
     "$target_mount/cache" \
     "$target_mount/venv" \
     "$target_mount/bootstrap" \
@@ -225,6 +174,8 @@ Environment=FYP_VLLM_MAX_NUM_SEQS=1
 Environment=FYP_VLLM_MAX_LORA_RANK=64
 Environment=FYP_VLLM_MAX_LORAS=1
 Environment=FYP_VLLM_MAX_CPU_LORAS=4
+Environment=FYP_LORA_RUNTIME_ENABLED=true
+Environment=FYP_LORA_ADAPTER_DIRECTORY=/mnt/llm-data/adapters
 Environment=HF_TOKEN_SSM_PARAMETER=${hf_token_parameter}
 Environment=HF_TOKEN_SSM_REGION=${aws_region}
 Environment=HF_HOME=/mnt/llm-data/cache
@@ -237,6 +188,8 @@ Environment=XDG_CACHE_HOME=/mnt/llm-data/xdg-cache
 # Optional host configuration and HF read token; keep credentials outside user data.
 EnvironmentFile=-/etc/qwen-vllm.env
 ExecStart=/opt/qwen-vllm/Script/serve_qwen35_vllm.sh
+ExecStartPost=/usr/bin/python3 /opt/qwen-vllm/Script/check_vllm_ready.py
+TimeoutStartSec=45min
 Restart=on-failure
 RestartSec=30
 
@@ -244,9 +197,16 @@ RestartSec=30
 WantedBy=multi-user.target
 UNIT
 
-systemctl daemon-reload
-systemctl enable --now llm-storage.service
-systemctl enable --now qwen-vllm.service
+# Start host services. A lost systemctl connection must not skip app bootstrap.
+systemctl_retry daemon-reload
+systemctl_retry enable --now llm-storage.service
+systemctl_retry enable --now qwen-vllm.service
+# Active is reached only after ExecStartPost checks health, models and runtime APIs.
+systemctl_retry is-active --quiet qwen-vllm.service
+
+# Reattach the journal reader after any systemd/journald upgrade during startup.
+systemctl_retry restart amazon-cloudwatch-agent.service
+systemctl_retry is-active --quiet amazon-cloudwatch-agent.service
 
 # Deploy public frontend/backend repositories after the host services are configured.
 /usr/local/sbin/bootstrap-fyp-apps

@@ -19,7 +19,9 @@ def handler(event, context):
     if action == "snapshot":
         return transfer.start_snapshot()
     if action == "prepare":
-        return transfer.prepare(event["command_id"], event["execution_id"])
+        return transfer.prepare(
+            event["command_id"], event["execution_id"], event.get("request")
+        )
     if action == "publish":
         return execution.publish(event["job"])
     if action == "publication_status":

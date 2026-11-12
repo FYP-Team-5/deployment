@@ -85,12 +85,12 @@ class MemoryState:
 
 
 class DatasetTests(unittest.TestCase):
-    def dataset(self, directory, change=None):
+    def dataset(self, directory, change=None, count=12):
         source = Path(directory) / "dataset.csv"
         with source.open("w", encoding="utf-8-sig", newline="") as target:
             writer = csv.DictWriter(target, fieldnames=FIELDS)
             writer.writeheader()
-            for i in range(12):
+            for i in range(count):
                 row = {
                     "id": str(i),
                     "question": f"Question {i},\nnext line",
@@ -101,7 +101,7 @@ class DatasetTests(unittest.TestCase):
                     "criteria_max_score[]": "[2.0, 1.0]",
                     "student_score": "2.0",
                 }
-                if i == 11 and change:
+                if i == count - 1 and change:
                     row.update(change)
                 writer.writerow(row)
         return source
@@ -116,6 +116,26 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(json.loads(row["criteria_max_score[]"]), [2, 1])
             self.assertEqual(float(row["student_score"]), 2)
             self.assertEqual(row["question"], "Question 0,\nnext line")
+
+    def test_accepts_feedback_column_and_preserves_targets(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = self.dataset(folder)
+            with source.open(encoding="utf-8-sig", newline="") as stream:
+                rows = list(csv.DictReader(stream))
+            for row in rows:
+                row["feedback"] = (
+                    'Keep this explanation, including "quotes".\nNext line.'
+                )
+            with source.open("w", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=[*FIELDS, "feedback"])
+                writer.writeheader()
+                writer.writerows(rows)
+            processed, stats = train.normalize_dataset(source)
+            with processed.open(newline="") as stream:
+                normalized = list(csv.DictReader(stream))
+            self.assertEqual(stats["training_rows"], 12)
+            self.assertEqual(normalized[0]["feedback"], rows[0]["feedback"])
+            self.assertEqual(json.loads(normalized[0]["criteria_score[]"]), [1, 0])
 
     def test_partial_credit_is_counted_and_excluded(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -157,7 +177,7 @@ class DatasetTests(unittest.TestCase):
             ):
                 train.normalize_dataset(self.dataset(folder, change))
 
-    def test_requires_ten_unique_questions(self):
+    def test_accepts_one_unique_question(self):
         with tempfile.TemporaryDirectory() as folder:
             source = self.dataset(folder)
             with source.open(encoding="utf-8-sig") as stream:
@@ -168,16 +188,31 @@ class DatasetTests(unittest.TestCase):
                 writer = csv.DictWriter(target, fieldnames=FIELDS)
                 writer.writeheader()
                 writer.writerows(rows)
-            with self.assertRaises(ValueError):
-                train.normalize_dataset(source)
+            _, stats = train.normalize_dataset(source)
+            self.assertEqual(stats["unique_questions"], 1)
+            self.assertEqual(stats["training_rows"], 12)
+
+    def test_rejects_no_compatible_rows(self):
+        for count, change in ((0, None), (1, {"desired_answer": ""})):
+            with (
+                self.subTest(count=count),
+                tempfile.TemporaryDirectory() as folder,
+                self.assertRaisesRegex(ValueError, "No compatible training rows"),
+            ):
+                train.normalize_dataset(self.dataset(folder, change, count=count))
 
 
 class RunnerTests(unittest.TestCase):
     dataset = DatasetTests.dataset
 
     def test_manifest_published_last_with_effective_configuration(self):
+        for row_count in (1, 2, 9, 10, 12):
+            with self.subTest(row_count=row_count):
+                self.check_manifest(row_count)
+
+    def check_manifest(self, row_count):
         with tempfile.TemporaryDirectory() as folder:
-            source = self.dataset(folder)
+            source = self.dataset(folder, count=row_count)
             notebook = Path(folder) / "reference.ipynb"
             cells = [{"cell_type": "markdown", "source": ""} for _ in range(47)]
             config_names = [
@@ -200,6 +235,28 @@ class RunnerTests(unittest.TestCase):
                 "cell_type": "code",
                 "source": [f"{name} = 1\n" for name in config_names],
             }
+            cells[8] = {
+                "cell_type": "code",
+                "source": f"records = [0] * {row_count}\ndataset = records",
+            }
+            cells[16] = {
+                "cell_type": "code",
+                "source": (
+                    "assert len(dataset) >= 10, 'Small datasets must bypass the reference split'\n"
+                    "train_dataset, validation_dataset, test_dataset = dataset[:-2], dataset[-2:-1], dataset[-1:]"
+                ),
+            }
+            cells[20] = {
+                "cell_type": "code",
+                "source": (
+                    "if len(dataset) < 10:\n"
+                    "    assert train_dataset is dataset\n"
+                    "    assert validation_dataset is dataset\n"
+                    "    assert test_dataset is dataset\n"
+                    "else:\n"
+                    "    assert len(train_dataset) + len(validation_dataset) + len(test_dataset) == len(dataset)"
+                ),
+            }
             cells[44] = {
                 "cell_type": "code",
                 "source": (
@@ -207,7 +264,7 @@ class RunnerTests(unittest.TestCase):
                     "evaluation_completed = True\n"
                     "finetuned_metrics = {'valid_examples': 2, 'final_score_mae': 0.5, 'f1': float('nan')}\n"
                     "baseline_metrics = {'valid_examples': 2, 'final_score_mae': 1.0}\n"
-                    "records = [0] * 12\nsequence_limit = MAX_SEQ_LENGTH\n"
+                    "sequence_limit = MAX_SEQ_LENGTH\n"
                     "bnb_config = SimpleNamespace(to_dict=lambda: {'load_in_4bit': True})\n"
                     "compute_dtype = 'torch.bfloat16'\ntarget_modules = ['model.layers.0.q_proj']\n"
                     "model = SimpleNamespace(config=SimpleNamespace(_commit_hash=BASE_REVISION))\n"
@@ -218,6 +275,7 @@ class RunnerTests(unittest.TestCase):
             notebook.write_text(json.dumps({"cells": cells}))
             args = SimpleNamespace(
                 dataset=str(source),
+                grading_only=row_count == 10,
                 checksum=hashlib.sha256(source.read_bytes()).hexdigest(),
                 notebook=str(notebook),
                 output=str(Path(folder) / "output"),
@@ -240,10 +298,25 @@ class RunnerTests(unittest.TestCase):
                 train.run(args)
             api_factory.assert_called_once_with(token=False)
             manifest = json.loads(s3.put_object.call_args.kwargs["Body"])
+            self.assertEqual(manifest["feedback_required"], row_count == 10)
+            self.assertTrue(
+                s3.put_object.call_args.kwargs["Key"].endswith(
+                    "/grading/result.json" if row_count == 10 else "/result.json"
+                )
+            )
             self.assertEqual(manifest["run_id"], JOB["run_id"])
             self.assertEqual(manifest["configuration"]["LORA_R"], 48)
             self.assertEqual(manifest["configuration"]["LORA_ALPHA"], 96)
             self.assertEqual(manifest["configuration"]["MAX_SEQ_LENGTH"], 4096)
+            self.assertEqual(manifest["dataset_rows"], row_count)
+            self.assertEqual(manifest["dataset_stats"]["training_rows"], row_count)
+            self.assertEqual(
+                manifest["configuration"]["held_out_evaluation"], row_count >= 10
+            )
+            self.assertEqual(
+                manifest["configuration"]["split_strategy"],
+                "question_group_80_10_10" if row_count >= 10 else "reuse_training_data",
+            )
             self.assertEqual(
                 manifest["configuration"]["base_model_revision"], "fixed-revision"
             )
@@ -271,6 +344,35 @@ class CoordinatorTests(unittest.TestCase):
             active.start()
             self.addCleanup(active.stop)
 
+    def test_paired_completion_checks_feedback_files_before_recording_success(self):
+        self.db.items["lock"] = dict(JOB)
+        prefix = f"candidates/{JOB['checksum']}/{JOB['run_id']}"
+        manifest = {
+            "status": "completed",
+            "dataset_checksum": JOB["checksum"],
+            "dataset_version": JOB["version_id"],
+            "run_id": JOB["run_id"],
+            "adapter_uri": f"s3://{execution.BUCKET}/{prefix}/adapter/",
+            "configuration": {"LORA_R": 48},
+            "metrics": {"valid_examples": 1, "final_score_mae": 0},
+            "feedback_required": True,
+        }
+        with (
+            patch.object(execution, "read_manifest", return_value=manifest),
+            patch.object(execution, "S3") as s3,
+        ):
+            with self.assertRaisesRegex(ValueError, "missing completed feedback"):
+                execution.finish(JOB)
+            self.assertNotIn("trained/" + JOB["checksum"], self.db.items)
+            manifest["feedback"] = {
+                "adapter_uri": f"s3://{execution.BUCKET}/{prefix}/feedback/adapter/",
+                "configuration": {"LORA_R": 16},
+            }
+            s3.reset_mock()
+            execution.finish(JOB)
+            self.assertEqual(s3.head_object.call_count, 5)
+        self.assertIn("trained/" + JOB["checksum"], self.db.items)
+
     def prepare(self):
         with patch.object(transfer, "snapshot", return_value=dict(JOB)):
             return transfer.prepare(object(), JOB["execution_id"])
@@ -279,6 +381,54 @@ class CoordinatorTests(unittest.TestCase):
         self.db.items["success/" + JOB["checksum"]] = {"checksum": JOB["checksum"]}
         self.assertFalse(self.prepare()["train"])
         self.assertFalse(self.db.items.get("lock", {}).get("execution_id"))
+
+    def test_manual_request_retrains_even_a_published_checksum(self):
+        self.db.items["success/" + JOB["checksum"]] = {"checksum": JOB["checksum"]}
+        self.db.items["trained/" + JOB["checksum"]] = dict(JOB)
+        with patch.object(transfer, "snapshot", return_value=dict(JOB)):
+            result = transfer.prepare(
+                "command",
+                JOB["execution_id"],
+                {
+                    "force_retrain": True,
+                    "requested_by": "2000001",
+                },
+            )
+        self.assertTrue(result["train"])
+        self.assertEqual(result["requested_by"], "2000001")
+        self.assertEqual(self.db.items["lock"]["execution_id"], JOB["execution_id"])
+
+    def test_manual_request_still_cannot_overlap_gpu_owner(self):
+        self.db.items["lock"] = dict(JOB, execution_id="another-execution")
+        with patch.object(transfer, "snapshot", return_value=dict(JOB)):
+            result = transfer.prepare(
+                "command", JOB["execution_id"], {"force_retrain": True}
+            )
+        self.assertEqual(result["reason"], "already_running")
+        self.assertEqual(self.db.items["lock"]["execution_id"], "another-execution")
+
+    def test_unpublished_manual_rerun_is_not_masked_by_older_success(self):
+        self.db.items["success/" + JOB["checksum"]] = dict(JOB, run_id="old-run")
+        self.db.items["trained/" + JOB["checksum"]] = dict(JOB, run_id="new-run")
+        result = self.prepare()
+        self.assertFalse(result["train"])
+        self.assertTrue(result["publish"])
+        self.assertEqual(result["run_id"], "new-run")
+        self.assertNotIn("lock", self.db.items)
+
+    def test_manual_request_replay_reuses_the_same_run(self):
+        with patch.object(transfer, "snapshot", return_value=dict(JOB)):
+            first = transfer.prepare(
+                "command", JOB["execution_id"], {"force_retrain": True}
+            )
+            replay = transfer.prepare(
+                "command", JOB["execution_id"], {"force_retrain": True}
+            )
+        self.assertEqual(first["run_id"], replay["run_id"])
+
+    def test_force_flag_must_be_a_boolean(self):
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            transfer.prepare("command", JOB["execution_id"], {"force_retrain": "false"})
 
     def test_previously_trained_checksum_skips_even_if_latest_changed(self):
         self.db.items["success/" + JOB["checksum"]] = {"checksum": JOB["checksum"]}
@@ -489,6 +639,41 @@ class S3StateTests(unittest.TestCase):
 
 
 class PublicationTests(unittest.TestCase):
+    def test_callback_503_retries_and_retains_status_without_response_body(self):
+        errors = [
+            publish.HTTPError(
+                "http://private/api",
+                503,
+                "Unavailable",
+                {},
+                io.BytesIO(b"fixture-secret"),
+            )
+            for _ in range(4)
+        ]
+        with (
+            patch.object(publish, "urlopen", side_effect=errors) as request,
+            patch.object(publish.time, "sleep"),
+            self.assertRaisesRegex(RuntimeError, "HTTP 503") as failure,
+        ):
+            publish.notify(
+                "http://private/api", "fixture-secret", {"run_id": JOB["run_id"]}
+            )
+        self.assertEqual(request.call_count, 4)
+        self.assertNotIn("fixture-secret", str(failure.exception))
+
+    def test_callback_auth_failure_is_not_retried(self):
+        error = publish.HTTPError(
+            "http://private/api", 401, "Unauthorized", {}, io.BytesIO()
+        )
+        with (
+            patch.object(publish, "urlopen", side_effect=error) as request,
+            self.assertRaisesRegex(RuntimeError, "HTTP 401"),
+        ):
+            publish.notify(
+                "http://private/api", "fixture-secret", {"run_id": JOB["run_id"]}
+            )
+        self.assertEqual(request.call_count, 1)
+
     def test_callback_replay_reuses_pinned_hf_upload(self):
         receipt = {
             "run_id": JOB["run_id"],
@@ -603,6 +788,17 @@ class PublicationTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_export_timeouts_allow_package_lock_wait_and_command_delivery(self):
+        machine = json.loads((ROOT / "workflow.asl.json.tftpl").read_text())
+        with patch.object(transfer, "send", return_value="command") as send:
+            transfer.start_snapshot()
+        command_timeout = send.call_args.args[2]
+        self.assertGreaterEqual(command_timeout, 600 + 360)
+        states = machine["States"]
+        attempts = states["ExportReady"]["Choices"][1]["NumericGreaterThanEquals"]
+        poll_budget = attempts * states["WaitExport"]["Seconds"]
+        self.assertGreater(poll_budget, command_timeout + 120)
+
     def test_state_graph_and_cleanup_paths(self):
         machine = json.loads((ROOT / "workflow.asl.json.tftpl").read_text())
         states = machine["States"]
@@ -620,6 +816,9 @@ class WorkflowTests(unittest.TestCase):
             states["Initialize"]["Parameters"]["execution_id.$"], "$$.Execution.Id"
         )
         self.assertIn("execution_id.$", states["NextAttempt"]["Parameters"])
+        self.assertEqual(states["Initialize"]["Parameters"]["request.$"], "$")
+        for name in ("Prepare", "NextExportAttempt", "NextAttempt"):
+            self.assertEqual(states[name]["Parameters"]["request.$"], "$.request")
 
 
 if __name__ == "__main__":

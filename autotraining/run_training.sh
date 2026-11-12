@@ -43,7 +43,7 @@ export UV_PYTHON_INSTALL_DIR="$WORK/uv-python"
 export XDG_CACHE_HOME="$WORK/cache"
 export TMPDIR="$WORK/tmp-$RUN_ID"
 mkdir -p "$HF_HOME" "$PIP_CACHE_DIR" "$UV_CACHE_DIR" "$UV_PYTHON_INSTALL_DIR" "$XDG_CACHE_HOME" "$TMPDIR"
-trap 'rm -rf -- "$WORK/output-$RUN_ID" "$TMPDIR"' EXIT
+trap 'rm -rf -- "$WORK/output-$RUN_ID" "$WORK/feedback-output-$RUN_ID" "$TMPDIR"' EXIT
 echo "Training workspace (persistent EBS): $WORK"
 df -h "$WORK"
 # Emergency cost guard if a Step Functions execution is force-terminated.
@@ -57,11 +57,13 @@ command -v nvidia-smi >/dev/null
 nvidia-smi
 if ! command -v aws >/dev/null || ! command -v gcc >/dev/null || ! command -v git >/dev/null || ! command -v curl >/dev/null; then
     apt-get update
-    apt-get install -y awscli build-essential git curl ca-certificates
+    # First-boot unattended upgrades may still hold dpkg's lock.
+    apt-get -o DPkg::Lock::Timeout=600 install -y awscli build-essential git curl ca-certificates
 fi
 command -v python3 >/dev/null
 
 aws s3 cp "s3://$BUCKET/scripts/train.py" train.py --region "$REGION" >/dev/null
+aws s3 cp "s3://$BUCKET/scripts/train_feedback.py" train_feedback.py --region "$REGION" >/dev/null
 aws s3 cp "s3://$BUCKET/scripts/requirements.txt" requirements.txt --region "$REGION" >/dev/null
 aws s3 cp "s3://$BUCKET/datasets/$CHECKSUM/dataset.csv" "dataset.csv" --region "$REGION" >/dev/null
 
@@ -82,7 +84,12 @@ if [[ ! -x .venv/bin/python ]] || ! .venv/bin/python -c 'import sys; assert sys.
 fi
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python -m pip check
+# Check feedback targets before spending GPU time on either model.
+.venv/bin/python train_feedback.py \
+    --prepare-only --bucket "$BUCKET" --checksum "$CHECKSUM" --run-id "$RUN_ID" \
+    --version-id "$VERSION_ID" --dataset "$WORK/dataset.csv" --output "$WORK/feedback-output-$RUN_ID"
 .venv/bin/python train.py \
+    --grading-only \
     --bucket "$BUCKET" \
     --checksum "$CHECKSUM" \
     --run-id "$RUN_ID" \
@@ -90,6 +97,15 @@ fi
     --version-id "$VERSION_ID" \
     --notebook "$WORK/model/Rubrics/Qlora Comparison/qlora (48r,96a).ipynb" \
     --output "$WORK/output-$RUN_ID"
+
+# A separate process releases the grading model, optimizer and CUDA allocations.
+.venv/bin/python train_feedback.py \
+    --bucket "$BUCKET" \
+    --checksum "$CHECKSUM" \
+    --run-id "$RUN_ID" \
+    --dataset "$WORK/dataset.csv" \
+    --version-id "$VERSION_ID" \
+    --output "$WORK/feedback-output-$RUN_ID"
 
 # Candidate is durable in S3; redriving this same run does not train twice.
 touch "$WORK/completed-$RUN_ID"

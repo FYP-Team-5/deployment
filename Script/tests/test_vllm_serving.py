@@ -26,6 +26,12 @@ class ServingWrapperTests(unittest.TestCase):
             "expected = os.environ.get('TEST_EXPECT_HF_TOKEN')\n"
             "if expected and os.environ.get('HF_TOKEN') != expected:\n"
             "    sys.exit('Expected HF token was not passed to vLLM')\n"
+            "if os.environ.get('TEST_EXPECT_RUNTIME') == '1':\n"
+            "    assert os.environ['VLLM_ALLOW_RUNTIME_LORA_UPDATING'] == 'True'\n"
+            "    plugins = os.environ['VLLM_PLUGINS'].split(',')\n"
+            "    assert 'bitsandbytes' in plugins, 'Quantization plugin was excluded'\n"
+            "    assert 'lora_filesystem_resolver' in plugins\n"
+            "    assert os.path.isdir(os.environ['VLLM_LORA_RESOLVER_CACHE_DIR'])\n"
             "print(json.dumps(sys.argv[1:]))\n"
         )
         vllm_stub.chmod(0o755)
@@ -105,6 +111,17 @@ class ServingWrapperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads(result.stdout.splitlines()[-1])
         self.assertEqual(args[args.index("--max-loras") + 1], "2")
+
+    def test_runtime_loading_keeps_bitsandbytes_quantization_available(self):
+        result = self.run_wrapper(
+            FYP_LORA_RUNTIME_ENABLED="true",
+            FYP_LORA_ADAPTER_DIRECTORY=str(self.directory / "candidates"),
+            FYP_VLLM_QUANTIZATION="bitsandbytes",
+            TEST_EXPECT_RUNTIME="1",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads(result.stdout.splitlines()[-1])
+        self.assertEqual(args[args.index("--quantization") + 1], "bitsandbytes")
 
     def test_invalid_adapter_capacity_is_rejected(self):
         for overrides in (

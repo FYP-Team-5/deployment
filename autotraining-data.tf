@@ -11,9 +11,16 @@ variable "autotraining_instance_type" {
   default     = null
   description = "Optional dedicated training instance type override. Defaults to the serving EC2 instance type."
 }
+variable "autotraining_force_destroy" {
+  type        = bool
+  default     = true
+  nullable    = false
+  description = "Allow Terraform to permanently delete all training-bucket objects, versions and delete markers when destroying the bucket. Defaults to true; set to false to guard against accidental teardown."
+}
 
 resource "aws_s3_bucket" "autotraining" {
-  bucket = "${var.name}-training-${data.aws_caller_identity.autotraining.account_id}"
+  bucket        = "${var.name}-training-${data.aws_caller_identity.autotraining.account_id}"
+  force_destroy = var.autotraining_force_destroy
 }
 resource "aws_s3_bucket_public_access_block" "autotraining" {
   bucket                  = aws_s3_bucket.autotraining.id
@@ -35,11 +42,24 @@ resource "aws_s3_bucket_versioning" "autotraining" {
   versioning_configuration { status = "Enabled" }
 }
 
+# S3 can return NoSuchKey for new objects while first-time versioning propagates.
+# AWS recommends waiting 15 minutes before writes. Repeat only when versioning
+# is created/reconfigured, including bucket replacement, not on script updates.
+resource "time_sleep" "autotraining_versioning" {
+  depends_on      = [aws_s3_bucket_versioning.autotraining]
+  create_duration = "15m"
+
+  lifecycle {
+    replace_triggered_by = [aws_s3_bucket_versioning.autotraining]
+  }
+}
+
 locals {
   autotraining_scripts = {
     "export_backend.sh" = "autotraining/export_backend.sh"
     "run_training.sh"   = "autotraining/run_training.sh"
     "train.py"          = "autotraining/train.py"
+    "train_feedback.py" = "autotraining/train_feedback.py"
     "requirements.txt"  = "autotraining/requirements.txt"
     "publish.py"        = "autotraining/publish.py"
     "publish.sh"        = "autotraining/publish.sh"
@@ -52,6 +72,8 @@ resource "aws_s3_object" "autotraining_scripts" {
   source                 = "${path.module}/${each.value}"
   etag                   = filemd5("${path.module}/${each.value}")
   server_side_encryption = "AES256"
+
+  depends_on = [time_sleep.autotraining_versioning]
 }
 
 # Adds narrowly scoped S3 permissions to the EXISTING serving role.
@@ -103,6 +125,10 @@ output "autotraining_control_prefix" {
 variable "autotraining_hf_repo" {
   type    = string
   default = "SmuFypTeam5/GradingQlora"
+}
+variable "autotraining_feedback_hf_repo" {
+  type    = string
+  default = "SmuFypTeam5/feedback"
 }
 variable "autotraining_hf_token_parameter" {
   description = "Existing SSM SecureString containing the HF token used only for branch creation/uploads; public reads need no token."

@@ -31,15 +31,19 @@ resource "aws_sfn_state_machine" "autotraining" {
   depends_on = [aws_iam_role_policy.autotraining_stepfunctions]
 }
 
-# The instructor API can start this workflow using the serving instance role.
+# The instructor API can start and report on this workflow using the serving
+# instance role. ListExecutions backs the Trained models in-progress view.
 resource "aws_iam_role_policy" "autotraining_backend_start" {
   name = "${var.name}-start-manual-training"
   role = aws_iam_role.llm.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow"
-      Action   = ["states:StartExecution"]
+      Effect = "Allow"
+      Action = [
+        "states:StartExecution",
+        "states:ListExecutions"
+      ]
       Resource = aws_sfn_state_machine.autotraining.arn
     }]
   })

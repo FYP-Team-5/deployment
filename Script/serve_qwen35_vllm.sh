@@ -22,7 +22,8 @@ FEEDBACK_LORA_PATH="${FEEDBACK_LORA_PATH:-SmuFypTeam5/feedback}"
 # Opt-in on the private serving host; backend deploys only approved commit-pinned adapters.
 if [[ "${FYP_LORA_RUNTIME_ENABLED:-false}" == "true" ]]; then
     export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
-    export VLLM_PLUGINS=lora_filesystem_resolver
+    # VLLM_PLUGINS is an allowlist; retain the external quantization plugin.
+    export VLLM_PLUGINS=bitsandbytes,lora_filesystem_resolver
     export VLLM_LORA_RESOLVER_CACHE_DIR="${FYP_LORA_ADAPTER_DIRECTORY:-/mnt/llm-data/adapters}"
     mkdir -p "$VLLM_LORA_RESOLVER_CACHE_DIR"
 fi
