@@ -2,7 +2,7 @@ name: Autotraining static checks
 
 on:
   push:
-    branches: [feat/autotraining]
+    branches: [main]
     paths:
       - 'autotraining/**'
       - 'Script/**'

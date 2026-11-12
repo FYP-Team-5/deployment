@@ -1,5 +1,4 @@
 # Isolated nightly training data plane. No changes to existing serving EC2.
-data "aws_caller_identity" "autotraining" {}
 
 variable "autotraining_schedule_enabled" {
   type        = bool
@@ -19,7 +18,7 @@ variable "autotraining_force_destroy" {
 }
 
 resource "aws_s3_bucket" "autotraining" {
-  bucket        = "${var.name}-training-${data.aws_caller_identity.autotraining.account_id}"
+  bucket        = "${var.name}-training-${data.aws_caller_identity.current.account_id}"
   force_destroy = var.autotraining_force_destroy
 }
 resource "aws_s3_bucket_public_access_block" "autotraining" {
@@ -107,7 +106,7 @@ resource "aws_iam_role_policy" "autotraining_backend_export" {
       {
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
-        Resource = [for parameter in [var.autotraining_hf_token_parameter, var.autotraining_callback_token_parameter] : "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.autotraining.account_id}:parameter${parameter}"]
+        Resource = [for parameter in [var.autotraining_hf_token_parameter, var.autotraining_callback_token_parameter] : "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${parameter}"]
       }
 
     ]

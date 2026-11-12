@@ -196,7 +196,7 @@ resource "aws_instance" "llm" {
     vllm_log_group                    = aws_cloudwatch_log_group.vllm.name
     hf_token_parameter                = var.vllm_hf_token_parameter
     training_callback_token_parameter = var.autotraining_callback_token_parameter
-    training_state_machine_arn        = "arn:${data.aws_partition.vllm.partition}:states:${var.aws_region}:${data.aws_caller_identity.vllm.account_id}:stateMachine:${var.name}-nightly-training"
+    training_state_machine_arn        = "arn:${data.aws_partition.current.partition}:states:${var.aws_region}:${data.aws_caller_identity.current.account_id}:stateMachine:${var.name}-nightly-training"
   }))
   user_data_replace_on_change = true
 

@@ -690,6 +690,7 @@ class PublicationTests(unittest.TestCase):
             callback_token_parameter="/callback",
             callback_url="http://private/api",
             repo="org/repo",
+            feedback_repo="org/feedback",
         )
         aws = MagicMock()
         aws.get_parameter.return_value = {"Parameter": {"Value": "secret"}}
@@ -717,6 +718,7 @@ class PublicationTests(unittest.TestCase):
             callback_token_parameter="/callback",
             callback_url="http://private/api",
             repo="org/repo",
+            feedback_repo="org/feedback",
         )
         manifest = {
             "run_id": JOB["run_id"],

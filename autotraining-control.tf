@@ -60,7 +60,7 @@ resource "aws_iam_role_policy" "autotraining_lambda" {
       {
         Effect   = "Allow"
         Action   = ["states:DescribeExecution"]
-        Resource = "arn:aws:states:${var.aws_region}:${data.aws_caller_identity.autotraining.account_id}:execution:${var.name}-nightly-training:*"
+        Resource = "arn:aws:states:${var.aws_region}:${data.aws_caller_identity.current.account_id}:execution:${var.name}-nightly-training:*"
       },
       {
         Effect   = "Allow"

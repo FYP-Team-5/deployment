@@ -152,7 +152,7 @@ def publish(args):
         feedback = manifest.get("feedback")
         if manifest.get("feedback_required") and not feedback:
             raise ValueError("Paired training has not completed the feedback stage")
-        feedback_repo = getattr(args, "feedback_repo", "SmuFypTeam5/feedback")
+        feedback_repo = args.feedback_repo
         if feedback and feedback_repo == args.repo:
             raise ValueError(
                 "Grading and feedback adapters require separate repositories"

@@ -1,10 +1,7 @@
 # Read only the parameter identity here. The vLLM process retrieves its value
 # at startup using the existing EC2 instance profile, outside Terraform state.
-data "aws_caller_identity" "vllm" {}
-data "aws_partition" "vllm" {}
-
 locals {
-  vllm_hf_token_parameter_arn = "arn:${data.aws_partition.vllm.partition}:ssm:${var.aws_region}:${data.aws_caller_identity.vllm.account_id}:parameter${var.vllm_hf_token_parameter}"
+  vllm_hf_token_parameter_arn = "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.vllm_hf_token_parameter}"
 }
 
 resource "aws_iam_role_policy" "vllm_hf_token" {
