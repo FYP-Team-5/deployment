@@ -17,6 +17,14 @@ See the [retraining workflow diagram and setup](autotraining/README.md).
 
 Requirements: Terraform 1.5+, authenticated AWS CLI, and sufficient GPU quota in the selected region (`us-east-1` by default).
 
+Before applying, create the required SSM SecureStrings for the Hugging Face
+upload token and training callback credential in that region. See the
+[credential setup](autotraining/README.md#setup). Bootstrap reads the callback
+credential directly from the parameter named by
+`autotraining_callback_token_parameter` and writes it to the backend's private
+Compose `.env` before starting the application. Its value stays outside
+Terraform state and logs. Missing or invalid credentials fail bootstrap.
+
 From this directory:
 
 ```bash
@@ -36,7 +44,16 @@ After startup:
 - Backend: `http://<public_ip>:8002/health`
 - vLLM: private port 8000; use `./connect-vllm.sh` for access.
 
-The bootstrap creates application `.env` files on the serving host. Complete the [retraining credentials and serving setup](autotraining/README.md#setup) before the first training run. Nightly scheduling is **disabled by default**.
+The bootstrap creates application `.env` files on the serving host, including the callback credential and workflow ARN. Nightly scheduling is **disabled by default**.
+
+New hosts enable runtime adapters automatically. Systemd waits up to 40 minutes
+for vLLM health, all three configured model aliases, and the runtime adapter
+loading API before completing startup and bootstrapping the application. This
+check runs again on service restarts. A failed check fails service startup and
+is logged in `journalctl -u qwen-vllm.service`; systemd retries the service.
+Terraform finishes creating EC2 before cloud-init finishes: use
+`sudo cloud-init status --wait` on the host to confirm bootstrap completion.
+Training and candidate deployment remain separate instructor actions.
 
 ## Grading and feedback on one vLLM instance
 
@@ -69,6 +86,7 @@ below. The service does not require a `.env` file.
 ```bash
 sudo install -o ubuntu -g ubuntu -m 0755 Script/serve_qwen35_vllm.sh /opt/qwen-vllm/Script/serve_qwen35_vllm.sh
 sudo install -o ubuntu -g ubuntu -m 0644 Script/requirements-vllm.txt /opt/qwen-vllm/Script/requirements-vllm.txt
+sudo install -o ubuntu -g ubuntu -m 0644 Script/check_vllm_ready.py /opt/qwen-vllm/Script/check_vllm_ready.py
 sudo apt-get update
 sudo apt-get install -y awscli
 sudo mkdir -p /etc/systemd/system/qwen-vllm.service.d
@@ -76,8 +94,14 @@ sudo tee /etc/systemd/system/qwen-vllm.service.d/20-adapters.conf >/dev/null <<'
 [Service]
 Environment=HF_TOKEN_SSM_PARAMETER=/fyp/training/hf-token
 Environment=HF_TOKEN_SSM_REGION=us-east-1
+Environment=FYP_LORA_RUNTIME_ENABLED=true
+Environment=FYP_LORA_ADAPTER_DIRECTORY=/mnt/llm-data/adapters
+Environment=FYP_VLLM_MAX_CPU_LORAS=4
 EnvironmentFile=-/etc/qwen-vllm.env
+ExecStartPost=/usr/bin/python3 /opt/qwen-vllm/Script/check_vllm_ready.py
+TimeoutStartSec=45min
 UNIT
+sudo install -d -o ubuntu -g ubuntu /mnt/llm-data/adapters
 sudo systemctl daemon-reload
 sudo systemctl restart qwen-vllm.service
 sudo journalctl -u qwen-vllm.service -f
@@ -124,6 +148,13 @@ Once startup completes, verify both adapter aliases are listed:
 ```bash
 curl --fail --silent --show-error http://127.0.0.1:8000/v1/models
 ```
+
+Runtime serving loads `bitsandbytes,lora_filesystem_resolver` through
+`VLLM_PLUGINS`. The bitsandbytes plugin is required by the pinned serving stack;
+allowing only the filesystem resolver prevents its quantization registration
+and causes `Unknown quantization method: bitsandbytes` at startup. See the
+[vLLM plugin loader](https://docs.vllm.ai/en/v0.29.0/api/vllm/plugins/) and
+[bitsandbytes plugin](https://github.com/vllm-project/vllm-bnb-plugin).
 
 Backend environment settings must match the served aliases:
 

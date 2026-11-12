@@ -171,14 +171,18 @@ resource "aws_instance" "llm" {
     delete_on_termination = true
   }
 
-  user_data_base64 = base64encode(templatefile("${path.module}/user-data.sh.tftpl", {
-    serve_script               = base64gzip(file("${path.module}/Script/serve_qwen35_vllm.sh"))
-    requirements               = base64gzip(file("${path.module}/Script/requirements-vllm.txt"))
-    aws_region                 = var.aws_region
-    cloud_init_log_group       = aws_cloudwatch_log_group.cloud_init.name
-    vllm_log_group             = aws_cloudwatch_log_group.vllm.name
-    hf_token_parameter         = var.vllm_hf_token_parameter
-    training_state_machine_arn = "arn:${data.aws_partition.vllm.partition}:states:${var.aws_region}:${data.aws_caller_identity.vllm.account_id}:stateMachine:${var.name}-nightly-training"
+  # cloud-init decompresses the script; keep EC2 user data below its 16 KiB limit.
+  user_data_base64 = base64gzip(templatefile("${path.module}/user-data.sh.tftpl", {
+    serve_script                      = base64gzip(file("${path.module}/Script/serve_qwen35_vllm.sh"))
+    requirements                      = base64gzip(file("${path.module}/Script/requirements-vllm.txt"))
+    readiness_script                  = base64gzip(file("${path.module}/Script/check_vllm_ready.py"))
+    callback_script                   = base64gzip(file("${path.module}/Script/configure_training_callback.py"))
+    aws_region                        = var.aws_region
+    cloud_init_log_group              = aws_cloudwatch_log_group.cloud_init.name
+    vllm_log_group                    = aws_cloudwatch_log_group.vllm.name
+    hf_token_parameter                = var.vllm_hf_token_parameter
+    training_callback_token_parameter = var.autotraining_callback_token_parameter
+    training_state_machine_arn        = "arn:${data.aws_partition.vllm.partition}:states:${var.aws_region}:${data.aws_caller_identity.vllm.account_id}:stateMachine:${var.name}-nightly-training"
   }))
   user_data_replace_on_change = true
 
@@ -189,7 +193,7 @@ resource "aws_instance" "llm" {
 
   tags = { Name = var.name }
 
-  depends_on = [aws_route_table_association.public, aws_iam_role_policy_attachment.ssm, aws_iam_role_policy.cloudwatch_logs, aws_iam_role_policy.vllm_hf_token]
+  depends_on = [aws_route_table_association.public, aws_iam_role_policy_attachment.ssm, aws_iam_role_policy.cloudwatch_logs, aws_iam_role_policy.vllm_hf_token, aws_iam_role_policy.autotraining_backend_export]
 }
 
 resource "aws_eip_association" "llm" {

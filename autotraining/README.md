@@ -63,18 +63,35 @@ repository's main branch is updated. Candidate reads and downloads are anonymous
 so both repositories need public read access. Only branch creation and uploads
 use the HF token stored in SSM.
 
-1. Deploy the updated backend/frontend and ensure the backend and SeaweedFS are running and the serving host is SSM-ready.
-2. Create these **SSM SecureString** parameters in the deployment region:
+1. Before applying Terraform, create these **SSM SecureString** parameters in the deployment region:
 
    | Parameter | Value |
    | --- | --- |
    | `/fyp/training/hf-token` | Token with write access to both `SmuFypTeam5/GradingQlora` and `SmuFypTeam5/feedback` |
-   | `/fyp/training/callback-token` | Random machine credential matching backend `TRAINING_CALLBACK_TOKEN` |
+   | `/fyp/training/callback-token` | Random, nonempty single-line machine credential |
 
-3. Set the backend `.env` values below, then rebuild/restart its Compose service:
+2. Apply the updated Terraform deployment. Bootstrap retrieves the existing
+   callback SecureString with the serving instance role and configures backend
+   `TRAINING_CALLBACK_TOKEN` before starting Compose. The publisher reads the
+   same parameter. Terraform stores only its name, never its value; changing
+   `autotraining_callback_token_parameter` changes both lookups. Bootstrap fails
+   if lookup or validation fails, instead of starting an unconfigured backend.
+
+3. New hosts also receive `TRAINING_STATE_MACHINE_ARN` automatically. For an
+   existing host, install the current deployment checkout and run this helper
+   to configure the callback from SSM, using your parameter name and region:
+
+   ```bash
+   sudo python3 Script/configure_training_callback.py \
+     --env-file /opt/fyp/backend/.env \
+     --parameter /fyp/training/callback-token --region us-east-1
+   sudo docker compose --project-directory /opt/fyp/backend up -d api
+   ```
+
+   Configure the workflow ARN and any optional repository settings in the
+   backend `.env` as needed, then rebuild/restart its Compose service:
 
    ```dotenv
-   TRAINING_CALLBACK_TOKEN=<same callback credential>
    TRAINING_STATE_MACHINE_ARN=<autotraining_state_machine_arn Terraform output>
    TRAINING_HF_REPO=SmuFypTeam5/GradingQlora
    TRAINING_FEEDBACK_HF_REPO=SmuFypTeam5/feedback
@@ -84,7 +101,11 @@ use the HF token stored in SSM.
    TRAINING_AUTO_DEPLOY_ENABLED=false
    ```
 
-4. Install the updated [serving wrapper](../Script/serve_qwen35_vllm.sh) on the serving host. Add this override with `sudo systemctl edit qwen-vllm.service`, then reload systemd and restart the service:
+4. New Terraform hosts enable runtime adapter loading and check vLLM readiness
+   automatically. For existing hosts, follow the
+   [serving update procedure](../README.md#grading-and-feedback-on-one-vllm-instance)
+   to install the updated wrapper and readiness script, configure systemd, and
+   restart vLLM. The service uses these settings:
 
    ```ini
    [Service]
@@ -166,7 +187,7 @@ Run `terraform plan -out=enable.tfplan`, review it, then `terraform apply enable
 - **QLoRA:** rank 48 / alpha 96, NF4 4-bit with double quantization, learning rate 5e-5, up to three epochs, batch 1 × accumulation 8, 4,096-token limit and an 80/10/10 question-group split. See [train.py](train.py) and [requirements.txt](requirements.txt).
 - **CSV:** accepts the backend's nine-column rubric schema with trailing `feedback`, plus legacy eight-column datasets. The grading stage ignores feedback text; the feedback stage uses nonempty saved explanations as completion targets. Paired training requires feedback targets in both its training and validation question groups. Partial-credit rows and missing desired answers are excluded and counted; at least one compatible row is required. Fewer than ten unique questions reuse training data for validation and evaluation, recorded as `held_out_evaluation=false` and `split_strategy=reuse_training_data` in the grading configuration. Larger datasets retain the grouped 80/10/10 split.
 - **Recovery:** training has a 12-hour SSM timeout. Terminal events and a 15-minute watchdog clean up failed/abandoned executions; the watchdog stops GPU runs older than 14 hours.
-- **Publication failure:** the message `HF publication/backend notification failed; retry without retraining` means the workflow reached the final `PublicationStatus` step and that SSM command did not succeed, so the evaluated adapter is on the GPU host and in S3 but no backend candidate exists. The backend registers candidates only from this notification, so nothing new appears on **Trained models**. Read the `StandardErrorContent` of that command (`aws ssm get-command-invocation --instance-id <backend-host> --command-id <id>`) and compare the callback's HTTP status with the table in [backend/README.md](../../backend/README.md): 404 means the backend image predates `POST /api/v1/training-runs` and must be rebuilt, 401 means the backend `TRAINING_CALLBACK_TOKEN` no longer matches the SSM value, 409 means the manifest changed for that run id, and a timeout means the private callback URL was unreachable. Retrying the execution never retrains; it repeats only publication and notification.
+- **Publication failure:** the message `HF publication/backend notification failed; retry without retraining` means the workflow reached the final `PublicationStatus` step and that SSM command did not succeed, so the evaluated adapter is on the GPU host and in S3 but no backend candidate exists. The backend registers candidates only from this notification, so nothing new appears on **Trained models**. Read the `StandardErrorContent` of that command (`aws ssm get-command-invocation --instance-id <backend-host> --command-id <id>`); failed callback retries retain the last HTTP status. Compare it with the table in [backend/README.md](../../backend/README.md): 404 means the backend image predates `POST /api/v1/training-runs` and must be rebuilt, 401 means the backend `TRAINING_CALLBACK_TOKEN` no longer matches the SSM value, 503 means the callback credential is missing from the backend (run the setup helper and recreate the API container), 409 means the manifest changed for that run id, and a timeout means the private callback URL was unreachable. Retrying the execution never retrains; it repeats only publication and notification.
 - **Local storage:** the trainer retains its encrypted 200 GiB gp3 EBS root volume when using `g5.xlarge`. `/opt/fyp-autotraining` contains the dataset, model checkout, virtual environment, managed Python, HF/package caches and checkpoints. The run script checks for at least 60 GiB free before downloads (`FYP_TRAINING_MIN_FREE_GIB` can override this budget), prints the actual workspace filesystem, and cleans each run's temporary files and output directory on exit. Completed-run markers and caches remain on EBS across nightly stops. It does not depend on or format the DLAMI NVMe instance store. `FYP_TRAINING_WORK_DIRECTORY` can override the workspace path; use persistent storage if overriding it.
 - **Artifact storage:** S3 retains unpublished artifacts and current run records. Published staging copies become eligible for expiry once older than 30 days; HF retains the published commit.
 - **Status:** inspect Step Functions executions, CloudWatch training/coordinator logs, and **Instructor → Trained models**. Verify a live AWS/GPU/HF/vLLM run before enabling the schedule.

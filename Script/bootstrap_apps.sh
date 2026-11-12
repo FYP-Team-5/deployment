@@ -50,6 +50,13 @@ set_env "$backend_env" LLM_MODEL "qwen35-9b-grading-qlora"
 set_env "$backend_env" LLM_GRADING_CONTRACT "criteria_array_v1"
 set_env "$backend_env" LLM_FEEDBACK_MODEL "qwen35-9b-feedback-qlora"
 
+script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+python3 "$script_directory/configure_training_callback.py" \
+    --env-file "$backend_env" \
+    --parameter "${TRAINING_CALLBACK_TOKEN_PARAMETER:-/fyp/training/callback-token}" \
+    --region "${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
+unset TRAINING_CALLBACK_TOKEN
+
 # NEXT_PUBLIC variables are embedded in the frontend image during the build.
 set_env "$frontend_env" NEXT_PUBLIC_API_URL "http://$public_ip:8002"
 set_env "$frontend_env" NEXT_PUBLIC_GRADING_API_KEY "$api_key"

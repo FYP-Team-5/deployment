@@ -36,6 +36,7 @@ def put_json(s3, bucket, key, value):
 
 def notify(url, token, candidate):
     body = json.dumps(candidate, allow_nan=False).encode()
+    last_error = "no response"
     for attempt in range(4):
         request = Request(
             url,
@@ -53,15 +54,20 @@ def notify(url, token, candidate):
                 raise ValueError("Backend did not confirm candidate registration")
             return
         except HTTPError as error:
-            if error.code < 500 and error.code != 429:
+            code = error.code
+            error.close()
+            last_error = f"HTTP {code}"
+            if code < 500 and code != 429:
                 raise RuntimeError(
-                    f"Backend rejected candidate metadata (HTTP {error.code})"
+                    f"Backend rejected candidate metadata (HTTP {code})"
                 ) from None
-        except (URLError, TimeoutError):
-            pass
+        except (URLError, TimeoutError) as error:
+            last_error = type(error).__name__
         if attempt < 3:
             time.sleep(2**attempt)
-    raise RuntimeError("Backend notification could not be confirmed; retry publication")
+    raise RuntimeError(
+        f"Backend notification could not be confirmed ({last_error}); retry publication"
+    )
 
 
 def publish_adapter(s3, bucket, prefix, repo, token, manifest, kind):

@@ -639,6 +639,41 @@ class S3StateTests(unittest.TestCase):
 
 
 class PublicationTests(unittest.TestCase):
+    def test_callback_503_retries_and_retains_status_without_response_body(self):
+        errors = [
+            publish.HTTPError(
+                "http://private/api",
+                503,
+                "Unavailable",
+                {},
+                io.BytesIO(b"fixture-secret"),
+            )
+            for _ in range(4)
+        ]
+        with (
+            patch.object(publish, "urlopen", side_effect=errors) as request,
+            patch.object(publish.time, "sleep"),
+            self.assertRaisesRegex(RuntimeError, "HTTP 503") as failure,
+        ):
+            publish.notify(
+                "http://private/api", "fixture-secret", {"run_id": JOB["run_id"]}
+            )
+        self.assertEqual(request.call_count, 4)
+        self.assertNotIn("fixture-secret", str(failure.exception))
+
+    def test_callback_auth_failure_is_not_retried(self):
+        error = publish.HTTPError(
+            "http://private/api", 401, "Unauthorized", {}, io.BytesIO()
+        )
+        with (
+            patch.object(publish, "urlopen", side_effect=error) as request,
+            self.assertRaisesRegex(RuntimeError, "HTTP 401"),
+        ):
+            publish.notify(
+                "http://private/api", "fixture-secret", {"run_id": JOB["run_id"]}
+            )
+        self.assertEqual(request.call_count, 1)
+
     def test_callback_replay_reuses_pinned_hf_upload(self):
         receipt = {
             "run_id": JOB["run_id"],

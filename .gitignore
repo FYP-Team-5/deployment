@@ -49,3 +49,7 @@ terraform.rc
 .venv/
 .bootstrap/
 *.tfplan
+
+# Generated deployment verification artifacts
+verification/
+*.log
