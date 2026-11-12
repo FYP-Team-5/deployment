@@ -17,6 +17,12 @@ See the [retraining workflow diagram and setup](autotraining/README.md).
 
 Requirements: Terraform 1.5+, authenticated AWS CLI, and sufficient GPU quota in the selected region (`us-east-1` by default).
 
+Terraform selects the first available standard Availability Zone that offers
+both serving and training instance types. Set `availability_zone` in local
+tfvars to pin another supported zone, for example `availability_zone = "us-east-1a"`.
+An unsupported override or no shared zone fails during planning. Instance-type
+support does not guarantee spare EC2 capacity at launch time.
+
 Before applying, create the required SSM SecureStrings for the Hugging Face
 upload token and training callback credential in that region. See the
 [credential setup](autotraining/README.md#setup). Bootstrap reads the callback

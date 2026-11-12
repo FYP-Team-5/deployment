@@ -13,9 +13,21 @@ resource "aws_vpc" "llm" {
 resource "aws_subnet" "llm" {
   vpc_id                  = aws_vpc.llm.id
   cidr_block              = "10.42.1.0/24"
+  availability_zone       = local.selected_availability_zone
   map_public_ip_on_launch = false
 
   tags = { Name = "${var.name}-public" }
+
+  lifecycle {
+    precondition {
+      condition     = length(local.supported_availability_zones) > 0
+      error_message = "No available Availability Zone in ${var.aws_region} supports both ${local.serving_instance_type} and ${local.training_instance_type}. Choose another region or training instance type."
+    }
+    precondition {
+      condition     = var.availability_zone == null ? true : contains(local.supported_availability_zones, var.availability_zone)
+      error_message = "The requested Availability Zone must be available and support both serving and training instance types. Supported zones: ${join(", ", local.supported_availability_zones)}."
+    }
+  }
 }
 
 resource "aws_internet_gateway" "llm" {
@@ -160,7 +172,7 @@ resource "aws_eip" "llm" {
 
 resource "aws_instance" "llm" {
   ami                         = data.aws_ssm_parameter.gpu_ami.value
-  instance_type               = "g5.xlarge"
+  instance_type               = local.serving_instance_type
   subnet_id                   = aws_subnet.llm.id
   vpc_security_group_ids      = [aws_security_group.llm.id]
   iam_instance_profile        = aws_iam_instance_profile.llm.name

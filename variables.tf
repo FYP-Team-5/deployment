@@ -10,6 +10,12 @@ variable "name" {
   default     = "fyp-qwen-vllm"
 }
 
+variable "availability_zone" {
+  description = "Optional subnet AZ. Must support both serving and training instance types. Defaults to the first available supported AZ in the region."
+  type        = string
+  default     = null
+}
+
 variable "vllm_hf_token_parameter" {
   description = "Existing SSM SecureString containing an HF token with read access to both serving adapters. Reuses the existing training token by default. Empty disables SSM lookup; Terraform never reads the token value."
   type        = string

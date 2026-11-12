@@ -87,7 +87,7 @@ resource "aws_iam_instance_profile" "autotraining" {
 
 resource "aws_instance" "autotraining" {
   ami                                  = data.aws_ssm_parameter.gpu_ami.value
-  instance_type                        = coalesce(var.autotraining_instance_type, aws_instance.llm.instance_type)
+  instance_type                        = local.training_instance_type
   subnet_id                            = aws_subnet.llm.id
   vpc_security_group_ids               = [aws_security_group.autotraining.id]
   iam_instance_profile                 = aws_iam_instance_profile.autotraining.name
