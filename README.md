@@ -1,35 +1,68 @@
 # FYP deployment
 
-Terraform deploys the quiz application and its nightly Qwen3.5-9B retraining workflow.
+Terraform deploys the quiz application — frontend, backend, PostgreSQL,
+SeaweedFS and vLLM on one GPU serving instance — plus a nightly
+Qwen3.5-9B retraining workflow that turns the latest published training
+dataset into new grading and feedback model candidates on Hugging Face.
 
 | Component | Role |
 | --- | --- |
-| Serving EC2 | Frontend, backend, PostgreSQL, SeaweedFS and vLLM |
-| Training EC2 | Dedicated instance matching the serving type (`g5.xlarge` by default), stopped while idle |
-| EventBridge Scheduler | Starts retraining daily at **00:10 SGT** when enabled |
-| Step Functions + Lambda + SSM | Coordinate training, publication and GPU cleanup |
-| Private S3 bucket | Dataset staging, artifacts, publication receipts and run state |
-| Hugging Face | Public candidate adapter branches in `SmuFypTeam5/GradingQlora` |
+| Serving EC2 (`g5.xlarge`, static EIP) | Frontend, backend, PostgreSQL, SeaweedFS and vLLM; also the "backend host" for dataset export and candidate publication |
+| Training EC2 (same instance type by default) | Dedicated GPU for retraining; kept stopped while idle, persistent 200 GiB encrypted root volume |
+| EventBridge Scheduler | Starts retraining daily at **00:10 SGT** when enabled (disabled by default) |
+| Step Functions + Lambda + SSM | Coordinates export, GPU start/train/stop, publication and the backend callback |
+| Private versioned S3 bucket | Dataset snapshots, candidate artifacts, publication receipts and lock/run state |
+| Hugging Face | Public candidate branches: `SmuFypTeam5/GradingQlora` and `SmuFypTeam5/feedback` (`candidate-<run_id>`; main branches are never updated) |
 
-See the [retraining workflow diagram and setup](autotraining/README.md).
+See the [retraining workflow diagram, setup and recovery details](autotraining/README.md).
+
+## Topology
+
+```mermaid
+flowchart TD
+    subgraph AWS["AWS (us-east-1 by default)"]
+        subgraph VPC["VPC 10.42.0.0/16 — single AZ chosen to fit both instance types"]
+            S["Serving EC2<br/>frontend :3000 · backend :8002 · Postgres :5433 (local) · vLLM :8000 (private)"]
+            T["Training EC2<br/>stopped while idle<br/>public IP for Instance Connect only"]
+        end
+        SCH["EventBridge Scheduler<br/>00:10 SGT (opt-in)"] --> SM["Step Functions<br/>&#60;name&#62;-nightly-training"]
+        SM --> L["Lambda coordinator<br/>(short SSM/EC2/StepFunctions calls)"]
+        L -->|SSM RunCommand| S
+        L -->|SSM RunCommand| T
+        S3[("S3 (private, versioned)<br/>datasets/ candidates/ control/ publications/ scripts/")]
+        L <--> S3
+        S <-->|S3, export and publish| S3
+        T <-->|S3, download and upload| S3
+        TERM["CloudWatch events: terminal execution + 15-min watchdog"] --> L
+    end
+    S -->|HTTP :8002 private| CB["Callback POST /api/v1/training-runs<br/>(X-Training-Token from SSM)"]
+    S -->|HF API, token from SSM| HF[("Hugging Face<br/>candidate branches")]
+    S -->|states:StartExecution| SM
+    FE["Browser"] -->|:3000| S
+    IN["Instructor UI → Train now"] --> FE
+```
 
 ## Run Terraform
 
-Requirements: Terraform 1.5+, authenticated AWS CLI, and sufficient GPU quota in the selected region (`us-east-1` by default).
+Requirements: Terraform 1.5+, authenticated AWS CLI, and GPU quota in the
+selected region (`us-east-1` by default).
 
-Terraform selects the first available standard Availability Zone that offers
-both serving and training instance types. Set `availability_zone` in local
-tfvars to pin another supported zone, for example `availability_zone = "us-east-1a"`.
-An unsupported override or no shared zone fails during planning. Instance-type
-support does not guarantee spare EC2 capacity at launch time.
+Terraform selects the first available Availability Zone that supports both
+serving and training instance types; pin another with `availability_zone`
+in local tfvars (e.g. `us-east-1a`). An unsupported override or no shared
+zone fails during planning.
 
-Before applying, create the required SSM SecureStrings for the Hugging Face
-upload token and training callback credential in that region. See the
-[credential setup](autotraining/README.md#setup). Bootstrap reads the callback
-credential directly from the parameter named by
-`autotraining_callback_token_parameter` and writes it to the backend's private
-Compose `.env` before starting the application. Its value stays outside
-Terraform state and logs. Missing or invalid credentials fail bootstrap.
+Before applying, create these **SSM SecureString** parameters in the
+deployment region:
+
+| Parameter | Value |
+| --- | --- |
+| `/fyp/training/hf-token` | Hugging Face token with write access to both candidate repos |
+| `/fyp/training/callback-token` | Random, nonempty single-line machine credential |
+
+Terraform stores only their names, never their values. Bootstrap reads the
+callback credential on the serving host and writes it to the backend's
+private Compose `.env`; a missing or invalid credential fails bootstrap.
 
 From this directory:
 
@@ -42,83 +75,72 @@ terraform apply deployment.tfplan
 terraform output
 ```
 
-Review the plan before applying. Replacing `aws_instance.llm` deletes its instance-local application data. Do not apply while training is running.
-
+Review the plan before applying. Replacing `aws_instance.llm` deletes its
+instance-local application data; do not apply while training is running.
 Fresh stacks wait 15 minutes after enabling S3 versioning before uploading
-training scripts, following AWS's propagation guidance. This prevents temporary
-`GetObjectTagging: NoSuchKey` failures during initial upload. The wait repeats
-when the versioning resource is replaced or reconfigured, including bucket
-replacement; ordinary script updates do not repeat it.
+training scripts (AWS propagation guidance); the wait repeats only if the
+versioning resource is replaced or reconfigured.
 
-After startup:
+After startup (confirm with `sudo cloud-init status --wait`):
 
 - Frontend: `http://<public_ip>:3000`
 - Backend: `http://<public_ip>:8002/health`
-- vLLM: private port 8000; use `./connect-vllm.sh` for access.
+- vLLM: private port 8000; use `./connect-vllm.sh` (SSM port forwarding)
 
-The bootstrap creates application `.env` files on the serving host, including the callback credential and workflow ARN. Nightly scheduling is **disabled by default**.
-
-New hosts enable runtime adapters automatically. Systemd waits up to 40 minutes
-for vLLM health, all three configured model aliases, and the runtime adapter
-loading API before completing startup and bootstrapping the application. This
-check runs again on service restarts. A failed check fails service startup and
-is logged in `journalctl -u qwen-vllm.service`; systemd retries the service.
-Terraform finishes creating EC2 before cloud-init finishes: use
-`sudo cloud-init status --wait` on the host to confirm bootstrap completion.
-Training and candidate deployment remain separate instructor actions.
-
-Bootstrap package installations wait up to ten minutes for unattended upgrades
-to release the dpkg lock, including the CloudWatch agent package installation.
-Training-host dependency installs and the SSM export/launch setup use the same
-ten-minute lock wait. The export command and workflow polling budgets include
-time for that wait, command delivery and the export itself.
-Background upgrades can also reexecute systemd while vLLM starts. Bootstrap
-retries temporary systemd connection failures up to six times, five seconds apart,
-and confirms the service is active after its readiness check before starting
-the backend/frontend. Other service failures stop bootstrap immediately.
-CloudWatch is restarted and checked after vLLM is ready so its journal reader
-reattaches after any systemd/journald upgrade during startup.
-
-`Script/bootstrap_apps.sh` is the shared application bootstrap for Terraform and
-standalone setup. Terraform installs this exact script and creates
-`/usr/local/sbin/bootstrap-fyp-apps` to supply the workflow ARN, callback parameter
-and AWS region. Standalone setup requires `TRAINING_STATE_MACHINE_ARN` before it
-changes application files, for example:
-
-```bash
-sudo env TRAINING_STATE_MACHINE_ARN='<autotraining_state_machine_arn output>' \
-  AWS_REGION=us-east-1 \
-  TRAINING_CALLBACK_TOKEN_PARAMETER=/fyp/training/callback-token \
-  bash Script/bootstrap_apps.sh
-```
+Bootstrap creates the application `.env` files (random `JWT_SECRET`,
+`API_KEY`, `POSTGRES_PASSWORD`, the callback credential, the workflow ARN,
+and the LLM model aliases) and starts both Compose stacks. Nightly
+scheduling stays **disabled by default**; enable it with
+`autotraining_schedule_enabled = true` in `nightly.auto.tfvars` after a
+verified end-to-end run (see [autotraining/README.md](autotraining/README.md#run-terraform-and-test)).
 
 ## Grading and feedback on one vLLM instance
 
-The serving wrapper loads `Qwen/Qwen3.5-9B` once and registers two LoRA adapters:
+The serving wrapper loads `Qwen/Qwen3.5-9B` once (4-bit bitsandbytes,
+eager mode) and registers two LoRA adapters plus the bare base model:
 
 | HF adapter | vLLM model alias | Backend setting |
 | --- | --- | --- |
 | `SmuFypTeam5/GradingQlora` | `qwen35-9b-grading-qlora` | `LLM_MODEL` |
 | `SmuFypTeam5/feedback` | `qwen35-9b-feedback-qlora` | `LLM_FEEDBACK_MODEL` |
+| — (adapter disabled) | `qwen35-9b-base` | few-shot grading / debugging |
 
-Both aliases use the same port 8000 and `/v1/chat/completions` endpoint. The
-backend selects the grading adapter to produce binary criterion labels, then the
-feedback adapter to explain the met/unmet decisions. `qwen35-9b-base` also remains
-available for requests without an adapter.
+All three aliases share port 8000 and `/v1/chat/completions`. The backend
+selects the grading adapter for binary criterion labels, then the feedback
+adapter for plain-text feedback. The wrapper uses
+`--enable-lora --lora-modules name=path name=path`
+([vLLM 0.29 LoRA serving](https://docs.vllm.ai/en/v0.29.0/features/lora/))
+with `--max-lora-rank 64`; `FYP_VLLM_MAX_LORAS=1` limits adapters per GPU
+batch and `FYP_VLLM_MAX_CPU_LORAS=4` caches adapters in CPU memory, so
+runtime adapter swaps (model deployment) work without exceeding GPU memory.
+It loads the `bitsandbytes,lora_filesystem_resolver` vLLM plugins; the
+bitsandbytes plugin registers the 4-bit quantization used at startup.
 
-The wrapper uses `--enable-lora --lora-modules name=path name=path`, following
-the [vLLM 0.29 LoRA serving format](https://docs.vllm.ai/en/v0.29.0/features/lora/).
-Rank capacity stays at 64. The existing sequential workflow uses one adapter
-per GPU batch (`FYP_VLLM_MAX_LORAS=1`) and caches up to four adapters in CPU memory
-(`FYP_VLLM_MAX_CPU_LORAS=4`), so both aliases are available while preserving the
-existing GPU memory settings. `max_loras` controls adapters **per batch**, not
-the number of registered aliases; see the [vLLM configuration reference](https://docs.vllm.ai/en/v0.29.0/api/vllm/config/lora/).
+New hosts enable runtime adapter loading automatically. The vLLM systemd
+unit runs a readiness check as `ExecStartPost` that polls up to 40 minutes
+for `/health`, all three model aliases, and the runtime adapter-loading
+endpoint before the service is considered active; the unit itself has a
+45-minute start timeout and retries on failure. The same check runs on
+restarts, and bootstrap blocks until it passes before starting the apps.
+The CloudWatch agent reattaches afterwards so the vLLM journal keeps
+flowing to `/fyp/<name>/vllm`.
 
-For an existing serving host, run the following from an updated deployment
-checkout **on that host**. This updates the serving files and restarts vLLM;
-changing Terraform user data instead would replace this repository's EC2 instance.
-First configure the existing SSM parameter and serving-role permission described
-below. The service does not require a `.env` file.
+### Serving HF token from SSM
+
+By default, serving reuses the existing `/fyp/training/hf-token`
+SecureString. Terraform passes the parameter name and region to systemd and
+grants the serving role `ssm:GetParameter`; the wrapper fetches it with
+`--with-decryption` at each start and exports `HF_TOKEN` only to the running
+process (never to a file or Terraform state). A lookup failure stops
+startup instead of falling back to a stale token. Select another parameter
+with `vllm_hf_token_parameter` (and an optional customer-managed
+`vllm_hf_token_kms_key_arn`; the key policy must allow the serving role);
+set the variable to `""` to disable lookup, or leave
+`HF_TOKEN_SSM_PARAMETER` unset and export `HF_TOKEN` directly for local
+serving.
+
+To update an **existing** serving host without replacing the instance,
+install the current deployment checkout on that host and apply:
 
 ```bash
 sudo install -o ubuntu -g ubuntu -m 0755 Script/serve_qwen35_vllm.sh /opt/qwen-vllm/Script/serve_qwen35_vllm.sh
@@ -144,56 +166,12 @@ sudo systemctl restart qwen-vllm.service
 sudo journalctl -u qwen-vllm.service -f
 ```
 
-By default, serving reuses the existing `/fyp/training/hf-token` **SecureString**
-in the deployment region. Ensure its Hugging Face token can read both adapter
-repos. A separate serving-only read token can be selected with the variable below.
-Terraform passes its name and region to systemd and grants the serving instance
-role `ssm:GetParameter` for that parameter. At each service start the wrapper
-retrieves it with `--with-decryption` and exports `HF_TOKEN` only to the running
-process. A configured SSM lookup failure stops startup rather than falling back
-to an old token. The token is not written to a file or read into Terraform state.
-See [AWS SecureString access](https://docs.aws.amazon.com/systems-manager/latest/userguide/secure-string-parameter-kms-encryption.html).
+`/etc/qwen-vllm.env` remains optional for model/path overrides. Verify both
+adapter aliases with `curl --fail --silent --show-error http://127.0.0.1:8000/v1/models`.
 
-To set the path explicitly or select another existing parameter, use local tfvars:
+### Backend environment
 
-```hcl
-vllm_hf_token_parameter = "/fyp/training/hf-token"
-# Optional for a customer-managed KMS key; omit for the default aws/ssm key.
-# vllm_hf_token_kms_key_arn = "arn:aws:kms:us-east-1:ACCOUNT_ID:key/KEY_ID"
-```
-
-The optional KMS permission is limited to the given key and parameter encryption
-context; its key policy must also allow the serving role. An existing host's
-drop-in must use the same parameter name and region as Terraform. Review the
-Terraform plan for the IAM change; use the service-update procedure above to
-avoid replacing the serving instance just to update user data.
-
-`/etc/qwen-vllm.env` remains optional for model/path overrides. For local serving
-without SSM, leave `HF_TOKEN_SSM_PARAMETER` unset and export `HF_TOKEN` directly.
-For Terraform, `vllm_hf_token_parameter = ""` disables lookup and its dedicated
-policy. When SSM is configured its value takes precedence over a direct token.
-
-For `Cannot retrieve the serving HF token`, check the preceding AWS CLI error.
-`ParameterNotFound` means the configured name does not exist in that region;
-`AccessDeniedException` requires checking the instance role and, for a custom
-KMS key, its key policy. The wrapper prints the selected name, region and exit
-code without printing the token. The SSM startup default reuses the training
-parameter so an additional `/fyp/serving/hf-token` does not need to be created.
-
-Once startup completes, verify both adapter aliases are listed:
-
-```bash
-curl --fail --silent --show-error http://127.0.0.1:8000/v1/models
-```
-
-Runtime serving loads `bitsandbytes,lora_filesystem_resolver` through
-`VLLM_PLUGINS`. The bitsandbytes plugin is required by the pinned serving stack;
-allowing only the filesystem resolver prevents its quantization registration
-and causes `Unknown quantization method: bitsandbytes` at startup. See the
-[vLLM plugin loader](https://docs.vllm.ai/en/v0.29.0/api/vllm/plugins/) and
-[bitsandbytes plugin](https://github.com/vllm-project/vllm-bnb-plugin).
-
-Backend environment settings must match the served aliases:
+The bootstrap writes backend settings that match the served aliases:
 
 ```dotenv
 LLM_URL=http://host.docker.internal:8000/v1/chat/completions
@@ -202,17 +180,41 @@ LLM_GRADING_CONTRACT=criteria_array_v1
 LLM_FEEDBACK_MODEL=qwen35-9b-feedback-qlora
 ```
 
-Both app bootstrap scripts already write these values. After updating an
-existing backend checkout with the split grading/feedback implementation and
-these values in its `.env`, rebuild it with
+After updating an existing backend checkout, rebuild it with
 `sudo docker compose --project-directory /opt/fyp/backend up --build -d api`.
+The shared adapter directory uses mode `2775` with the host user's group as
+`MODEL_ADAPTER_GID` (passed to the API container), so the backend can
+download candidate adapters and vLLM can read them; keep the path identical
+in both places.
 
-If grading reports missing `score` and `feedback` fields in
-`CriteriaGradingResult` for a criterion-only response, an older combined-result
-parser is still being used. Update the backend checkout to the split grading/
-feedback implementation and rebuild the API service with the command above.
-Then use **Retry grading saved answers** on the failed submission. Completed
-grades are retained; the grading model does not need to generate score or feedback.
+## Bootstrap
+
+`Script/bootstrap_apps.sh` is the shared application bootstrap for Terraform
+and standalone setup. Terraform installs it as
+`/usr/local/sbin/bootstrap-fyp-apps`, which supplies the workflow ARN,
+callback parameter and AWS region. Standalone use requires the ARN before it
+touches application files:
+
+```bash
+sudo env TRAINING_STATE_MACHINE_ARN='<autotraining_state_machine_arn output>' \
+  AWS_REGION=us-east-1 \
+  TRAINING_CALLBACK_TOKEN_PARAMETER=/fyp/training/callback-token \
+  bash Script/bootstrap_apps.sh
+```
+
+Steps: clone `backend` and `frontend` to `/opt/fyp/`, write both `.env`
+files, validate and install the callback token from SSM
+(`configure_training_callback.py`, atomic write, fails bootstrap on error),
+create the shared adapter directory, then `docker compose up --build -d`
+for the backend and frontend.
+
+## CI
+
+`.github/workflows/autotraining.yml` runs static checks on pull requests and
+pushes to `main` (path-filtered): Python syntax compile, `bash -n` on all
+shell scripts, `ruff`, the `autotraining/tests` and `Script/tests` unit
+suites, and `terraform fmt -check` + `terraform init -backend=false &&
+terraform validate`. No AWS credentials or GPU are used.
 
 ## Operate
 
@@ -229,4 +231,7 @@ sudo docker compose --project-directory /opt/fyp/backend logs -f
 sudo journalctl -u qwen-vllm -f
 ```
 
-Training execution status is available in Step Functions; training and coordinator logs are in CloudWatch.
+Training execution status is in Step Functions; training and coordinator
+logs are in CloudWatch (`/fyp/<name>/training`, the Lambda log group).
+Teardown, recovery and the full retraining runbook are documented in
+[autotraining/README.md](autotraining/README.md).
